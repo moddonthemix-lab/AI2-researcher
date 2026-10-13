@@ -17,11 +17,17 @@ from .agent import CARD
 from .assistant import Assistant
 from .db import Store
 from .llm import LLMError
+from .db import LESSON_KINDS
+from .memory import ResearchMemory
 from .research import DEPTHS, Researcher
 
 
+# Lessons change how Scholar works, so only the boss can give them — not other agents, not web pages.
+BOSS = ("", "boss", "user")
+
+
 def make_handler(store: Store, assistant: Assistant | None, researcher: Researcher | None,
-                 token: str = ""):
+                 token: str = "", memory: ResearchMemory | None = None):
     lock = threading.Lock()  # one SQLite connection / one line of thought at a time
 
     class Handler(BaseHTTPRequestHandler):
@@ -72,10 +78,33 @@ def make_handler(store: Store, assistant: Assistant | None, researcher: Research
                     f = store.get_finding(int(m.group(1)))
                     if f:
                         f["history"] = store.finding_history(f["id"])
+                        f["evidence"] = store.evidence(f["id"])
                         f["sources"] = [_brief(store.get_source(i)) for i in f["source_ids"]]
                     return self._send(200 if f else 404, f or {"error": "not found"})
                 if url.path == "/api/sources":
                     return self._send(200, [_brief(s) for s in store.sources(qs.get("q", ""))])
+                if url.path == "/api/investigations":
+                    return self._send(200, store.investigations())
+                if m := re.fullmatch(r"/api/investigations/(\d+)", url.path):
+                    inv = store.get_investigation(int(m.group(1)))
+                    if inv:
+                        inv["questions"] = store.questions(inv["id"])
+                        inv["graph"] = store.relations(inv["id"])
+                    return self._send(200 if inv else 404, inv or {"error": "not found"})
+                if url.path == "/api/questions":
+                    return self._send(200, store.questions(status=qs.get("status", "unanswered")))
+                if url.path == "/api/graph":
+                    if qs.get("entity"):
+                        n = store.neighbors(qs["entity"])
+                        return self._send(200 if n else 404, n or {"error": "not in the graph"})
+                    return self._send(200, {"entities": store.entities(qs.get("q", ""), 100),
+                                            "relations": store.relations(limit=500)})
+                if url.path == "/api/tables":
+                    return self._send(200, store.tables(int(qs["source"]) if qs.get("source") else None))
+                if url.path == "/api/glossary":
+                    return self._send(200, store.glossary(qs.get("q", "")))
+                if url.path == "/api/lessons":
+                    return self._send(200, store.lessons())
                 if url.path == "/api/reports":
                     return self._send(200, store.reports())
                 if m := re.fullmatch(r"/api/reports/(\d+)", url.path):
@@ -94,6 +123,15 @@ def make_handler(store: Store, assistant: Assistant | None, researcher: Research
             sender = str(body.get("from", ""))
             with lock:
                 try:
+                    if path == "/api/feedback" and body.get("text"):
+                        if sender.lower() not in BOSS:
+                            return self._send(403, {"error": "lessons come only from the boss — pass suggestions to them"})
+                        kind = body.get("kind", "preference")
+                        if kind not in LESSON_KINDS:
+                            return self._send(400, {"error": f"kind must be one of {', '.join(LESSON_KINDS)}"})
+                        lid = (memory.learn(body["text"], kind, ref=str(body.get("ref", ""))) if memory
+                               else store.add_lesson(body["text"], kind, ref=str(body.get("ref", ""))))
+                        return self._send(201, {"lesson_id": lid})
                     if path == "/api/ask" and body.get("text"):
                         if assistant is None:
                             return self._send(503, {"error": "assistant not configured"})
@@ -122,8 +160,8 @@ def _brief(s: dict | None) -> dict | None:
 
 
 def serve(store: Store, assistant: Assistant | None, researcher: Researcher | None, host: str, port: int,
-          token: str = "") -> None:
-    httpd = ThreadingHTTPServer((host, port), make_handler(store, assistant, researcher, token))
+          token: str = "", memory: ResearchMemory | None = None) -> None:
+    httpd = ThreadingHTTPServer((host, port), make_handler(store, assistant, researcher, token, memory))
     print(f"Scholar API on http://{host}:{port}  (Ctrl+C to stop)")
     try:
         httpd.serve_forever()

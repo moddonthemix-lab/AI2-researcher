@@ -41,7 +41,7 @@ def test_html_to_text_strips_chrome():
     <footer>Copyright</footer></body></html>"""
     d = html_to_text(html)
     assert d["title"] == "Doc" and d["published"] == "2025-03-04"
-    assert "margins averaged 18 percent" in d["text"] and "## Findings" in d["text"]
+    assert "margins averaged 18 percent" in d["text"] and "# Findings" in d["text"]
     assert "evil" not in d["text"] and "Contact" not in d["text"] and "Copyright" not in d["text"]
 
 

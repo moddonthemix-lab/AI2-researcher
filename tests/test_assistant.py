@@ -68,3 +68,19 @@ def test_every_tool_has_valid_schema():
         fn = schema["function"]
         assert fn["name"] and fn["description"]
         assert set(fn["parameters"]["required"]) <= set(fn["parameters"]["properties"])
+
+
+def test_new_tools(tb):
+    tb.db.relate("StockX", "partners_with", "Nike", 1)
+    assert json.loads(tools.call(tb, "explore_entity", {"name": "stockx"}))["relations"][0]["object"] == "Nike"
+    r = json.loads(tools.call(tb, "read_source", {"url": "https://www.bls.gov/sneakers"}))
+    assert r["tables"] and r["parser"] == "html"
+    tid = r["tables"][0]["table_id"]
+    out = json.loads(tools.call(tb, "run_python", {
+        "code": "import csv\nrows=list(csv.DictReader(open('T%d.csv')))\nprint(int(rows[1]['Index'])/int(rows[0]['Index']))" % tid,
+        "table_ids": [tid]}))
+    assert out["ok"] and out["stdout"].strip() == "1.12"
+    st = json.loads(tools.call(tb, "stress_test", {"price": [180, 220], "unit_cost": [150], "units_per_month": [5, 10, 20]}))
+    assert "prob_monthly_loss" in st
+    lib = json.loads(tools.call(tb, "search_library", {"query": "sneaker prices"}))
+    assert set(lib) == {"findings", "passages", "past_investigations", "glossary", "lessons"}

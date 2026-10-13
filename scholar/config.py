@@ -31,6 +31,16 @@ class Config:
     searxng_url: str = field(default_factory=lambda: _env("SCHOLAR_SEARXNG_URL"))
     # Optional Tor SOCKS5 proxy (e.g. 127.0.0.1:9050) — enables reading .onion sources.
     tor_proxy: str = field(default_factory=lambda: _env("SCHOLAR_TOR_PROXY"))
+    # OpenAlex (250M+ scholarly works) wants a free API key: https://openalex.org/settings/api
+    openalex_key: str = field(default_factory=lambda: _env("SCHOLAR_OPENALEX_KEY"))
+    # SEC EDGAR asks every automated client to identify itself with contact info.
+    contact: str = field(default_factory=lambda: _env("SCHOLAR_CONTACT"))
+    # Semantic memory: embeddings from Ollama, stored in Qdrant if configured, else in scholar.db.
+    embed_model: str = field(default_factory=lambda: _env("SCHOLAR_EMBED_MODEL", "nomic-embed-text"))
+    qdrant_url: str = field(default_factory=lambda: _env("SCHOLAR_QDRANT_URL"))
+    qdrant_api_key: str = field(default_factory=lambda: _env("SCHOLAR_QDRANT_API_KEY"))
+    # Python sandbox for quantitative analysis
+    sandbox_timeout: int = field(default_factory=lambda: int(_env("SCHOLAR_SANDBOX_TIMEOUT", "60")))
     # HTTP API (how the rest of the family will reach Scholar)
     api_host: str = field(default_factory=lambda: _env("SCHOLAR_API_HOST", "127.0.0.1"))
     api_port: int = field(default_factory=lambda: int(_env("SCHOLAR_API_PORT", "8766")))
@@ -44,5 +54,16 @@ class Config:
     def reports_dir(self) -> Path:
         return self.home / "reports"
 
+    @property
+    def documents_dir(self) -> Path:
+        """Downloaded originals (PDFs, filings) and the tables extracted from them."""
+        return self.home / "documents"
+
+    @property
+    def analysis_dir(self) -> Path:
+        """One folder per sandboxed Python run: the code, its inputs and its outputs."""
+        return self.home / "analysis"
+
     def ensure_home(self) -> None:
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        for d in (self.reports_dir, self.documents_dir, self.analysis_dir):
+            d.mkdir(parents=True, exist_ok=True)

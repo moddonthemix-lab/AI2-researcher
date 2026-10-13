@@ -26,86 +26,29 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import urllib.robotparser
 import xml.etree.ElementTree as ET
 from html import unescape
-from html.parser import HTMLParser
 
 from . import credibility
+from .documents import Document, DocumentError, parse as parse_document, parse_html
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) Scholar/0.1 (personal research assistant)"
 # Public APIs (Wikipedia, arXiv, Crossref) ask bots to identify themselves honestly.
 API_AGENT = "Scholar/0.1 (personal research assistant; https://github.com/moddonthemix-lab/AI2-researcher)"
 MAX_BYTES = 4_000_000
-MAX_TEXT = 60_000  # characters of readable text kept per source
+MAX_TEXT = 60_000       # characters of readable text kept per web page
+MAX_DOC_TEXT = 400_000  # whole documents (reports, filings, papers) are kept in full
+DOI_PREFIX = re.compile(r"^(https?://(dx\.)?doi\.org/|doi:)", re.I)
 
 
 class WebError(RuntimeError):
     pass
 
 
-# ---------------------------------------------------------------- HTML -> text
-class _Readable(HTMLParser):
-    SKIP = {"script", "style", "noscript", "svg", "nav", "footer", "header", "form", "aside",
-            "iframe", "button", "select", "template"}
-    BLOCK = {"p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "tr",
-             "table", "section", "article", "blockquote", "pre", "dd", "dt", "figcaption"}
-
-    def __init__(self):
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-        self.skip = 0
-        self.in_title = False
-        self.title = ""
-        self.meta: dict[str, str] = {}
-
-    def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        if tag in self.SKIP:
-            self.skip += 1
-        elif tag == "title":
-            self.in_title = True
-        elif tag == "meta":
-            key = (a.get("property") or a.get("name") or "").lower()
-            if key and a.get("content"):
-                self.meta[key] = a["content"]
-        if tag in self.BLOCK:
-            self.parts.append("\n")
-        if tag in ("h1", "h2", "h3") and not self.skip:
-            self.parts.append("## ")
-
-    def handle_endtag(self, tag):
-        if tag in self.SKIP and self.skip:
-            self.skip -= 1
-        elif tag == "title":
-            self.in_title = False
-        if tag in self.BLOCK:
-            self.parts.append("\n")
-
-    def handle_data(self, data):
-        if self.in_title:
-            self.title += data
-        elif not self.skip:
-            self.parts.append(data)
-
-
 def html_to_text(html: str) -> dict:
-    p = _Readable()
-    p.feed(html)
-    text = "".join(p.parts)
-    text = re.sub(r"[ \t\r\f\v]+", " ", text)
-    text = re.sub(r"\n\s*\n+", "\n\n", text)
-    lines = [ln.strip() for ln in text.split("\n")]
-    # Drop menu crumbs: very short lines that aren't headings.
-    text = "\n".join(ln for ln in lines if len(ln) > 30 or ln.startswith("##") or not ln).strip()
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    m = p.meta
-    return {
-        "title": (m.get("og:title") or p.title).strip(),
-        "published": (m.get("article:published_time") or m.get("date") or m.get("dc.date")
-                      or m.get("citation_publication_date") or "")[:10],
-        "description": m.get("description") or m.get("og:description") or "",
-        "text": text,
-    }
+    d = parse_html(html)
+    return {"title": d.title, "published": d.published, "description": d.description, "text": d.text}
 
 
 def _strip_tags(s: str) -> str:
@@ -138,8 +81,11 @@ def _socks5_connect(proxy: str, host: str, port: int, timeout: float) -> socket.
 # ------------------------------------------------------------------------ Web
 class Web:
     def __init__(self, searxng_url: str = "", tor_proxy: str = "", timeout: float = 25,
-                 allow_private: bool = False):
+                 allow_private: bool = False, openalex_key: str = "", contact: str = ""):
         self.searxng_url = searxng_url.rstrip("/")
+        self.openalex_key = openalex_key
+        self.contact = contact
+        self._robots: dict[str, urllib.robotparser.RobotFileParser | None] = {}
         self.tor_proxy = tor_proxy
         self.timeout = timeout
         self.allow_private = allow_private
@@ -173,13 +119,14 @@ class Web:
                     raise WebError(f"refusing to read {u.hostname}: it is on your private network")
         return u
 
-    def get(self, url: str, accept: str = "*/*", agent: str = USER_AGENT) -> tuple[str, str, bytes]:
+    def get(self, url: str, accept: str = "*/*", agent: str = USER_AGENT,
+            headers: dict | None = None) -> tuple[str, str, bytes]:
         """Return (final_url, content_type, body)."""
         u = self._check_target(url)
         if u.hostname.endswith(".onion"):
             return self._get_via_tor(url, accept)
         req = urllib.request.Request(url, headers={"User-Agent": agent, "Accept": accept,
-                                                   "Accept-Language": "en-US,en;q=0.8"})
+                                                   "Accept-Language": "en-US,en;q=0.8", **(headers or {})})
         for attempt in (1, 2):
             try:
                 with self._opener.open(req, timeout=self.timeout) as resp:
@@ -224,8 +171,8 @@ class Web:
         except (OSError, http.client.HTTPException) as e:
             raise WebError(f"could not reach {url} over Tor: {e}") from e
 
-    def get_json(self, url: str) -> dict:
-        _, _, body = self.get(url, "application/json", API_AGENT)
+    def get_json(self, url: str, agent: str = API_AGENT, headers: dict | None = None) -> dict:
+        _, _, body = self.get(url, "application/json", agent, headers)
         try:
             return json.loads(body)
         except ValueError as e:
@@ -262,19 +209,98 @@ class Web:
                               "snippet": (p.get("extract") or "")[:1500]}) for p in pages]
 
     def papers(self, query: str, limit: int = 6) -> list[dict]:
-        """Academic papers from arXiv and Crossref, interleaved."""
-        out: list[dict] = []
-        errors = []
-        for fn in (self._arxiv, self._crossref):
+        """Academic papers from OpenAlex, arXiv and Crossref, interleaved and de-duplicated by DOI."""
+        lists, errors = [], []
+        for fn in (self.openalex, self._arxiv, self._crossref):
             try:
-                out.append(fn(query, limit))
+                lists.append(fn(query, limit))
             except WebError as e:
                 errors.append(str(e))
-                out.append([])
-        merged = [r for pair in zip(*out) for r in pair] + out[0][len(out[1]):] + out[1][len(out[0]):]
+        merged, seen = [], set()
+        for i in range(max((len(x) for x in lists), default=0)):
+            for lst in lists:
+                if i < len(lst):
+                    key = (lst[i].get("doi") or lst[i]["url"]).lower()
+                    if key not in seen:
+                        seen.add(key)
+                        merged.append(lst[i])
         if not merged and errors:
             raise WebError("; ".join(errors))
         return merged[:limit]
+
+    # ---- OpenAlex: 250M+ works, with citation links both ways
+    def _openalex(self, path: str, params: dict) -> dict:
+        if self.openalex_key:
+            params = {**params, "api_key": self.openalex_key}
+        elif self.contact:
+            params = {**params, "mailto": self.contact}
+        return self.get_json("https://api.openalex.org" + path + "?" + urllib.parse.urlencode(params))
+
+    def openalex(self, query: str, limit: int = 6) -> list[dict]:
+        data = self._openalex("/works", {"search": query, "per_page": limit})
+        return [parse_openalex_work(w) for w in data.get("results", [])]
+
+    def openalex_work(self, ident: str) -> dict:
+        """Look up one work by DOI, OpenAlex id (W123…) or URL."""
+        ident = ident.strip()
+        if DOI_PREFIX.match(ident):
+            ident = "doi:" + DOI_PREFIX.sub("", ident)
+        elif ident.lower().startswith("10."):
+            ident = "doi:" + ident
+        elif "openalex.org/" in ident:
+            ident = ident.rsplit("/", 1)[-1]
+        return parse_openalex_work(self._openalex(f"/works/{urllib.parse.quote(ident, safe=':/')}", {}))
+
+    def references_of(self, ident: str, limit: int = 15) -> list[dict]:
+        """The works this paper cites — most-cited first, so the original studies surface."""
+        work = self.openalex_work(ident)
+        ids = [r.rsplit("/", 1)[-1] for r in work.get("referenced_works", [])][:100]
+        if not ids:
+            return []
+        data = self._openalex("/works", {"filter": "openalex:" + "|".join(ids),
+                                          "sort": "cited_by_count:desc", "per_page": limit})
+        return [parse_openalex_work(w) for w in data.get("results", [])]
+
+    def cited_by(self, ident: str, limit: int = 10) -> list[dict]:
+        """Newer works that cite this one — how the finding held up later."""
+        work = self.openalex_work(ident)
+        wid = work["openalex_id"].rsplit("/", 1)[-1]
+        data = self._openalex("/works", {"filter": f"cites:{wid}", "sort": "publication_date:desc",
+                                          "per_page": limit})
+        return [parse_openalex_work(w) for w in data.get("results", [])]
+
+    # ---- SEC EDGAR: company filings (10-K, 10-Q, 8-K, S-1, exhibits like EX-21 subsidiaries)
+    def _sec_agent(self) -> str:
+        if not self.contact:
+            raise WebError("SEC EDGAR requires contact info: set SCHOLAR_CONTACT to your email")
+        return f"Scholar personal research {self.contact}"
+
+    def filings(self, query: str, forms: str = "", limit: int = 8) -> list[dict]:
+        """Full-text search across SEC filings since 2001."""
+        params = {"q": query}
+        if forms:
+            params["forms"] = forms
+        data = self.get_json("https://efts.sec.gov/LATEST/search-index?" + urllib.parse.urlencode(params),
+                             agent=self._sec_agent())
+        return parse_edgar(data)[:limit]
+
+    # ---- documents
+    def allowed_by_robots(self, url: str) -> bool:
+        """Respect robots.txt before downloading whole documents."""
+        u = urllib.parse.urlparse(url)
+        if u.hostname and u.hostname.endswith(".onion"):
+            return True
+        base = f"{u.scheme}://{u.netloc}"
+        if base not in self._robots:
+            rp = urllib.robotparser.RobotFileParser()
+            try:
+                _, _, body = self.get(base + "/robots.txt", "text/plain")
+                rp.parse(body.decode("utf-8", "replace").splitlines())
+                self._robots[base] = rp
+            except WebError:
+                self._robots[base] = None  # no robots.txt (or unreachable): nothing forbidden
+        rp = self._robots[base]
+        return rp is None or rp.can_fetch("Scholar", url)
 
     def _arxiv(self, query: str, limit: int) -> list[dict]:
         _, _, body = self.get("https://export.arxiv.org/api/query?" + urllib.parse.urlencode(
@@ -288,25 +314,31 @@ class Web:
              "select": "DOI,title,abstract,published,container-title,author,URL"}))
         return parse_crossref(data)
 
-    # ---- read one page
-    def read(self, url: str) -> dict:
-        """Fetch a URL and return readable text plus credibility info."""
-        final, ctype, body = self.get(url)
-        ctype = ctype.lower()
-        if "pdf" in ctype or body[:5] == b"%PDF-":
-            doc = {"title": "", "published": "", "text": _pdf_text(body)}
-        elif "html" in ctype or body.lstrip()[:1] == b"<":
-            doc = html_to_text(body.decode(_charset(ctype), "replace"))
-        else:
-            doc = {"title": "", "published": "", "text": body.decode(_charset(ctype), "replace")}
+    # ---- read one page or document
+    def read(self, url: str, respect_robots: bool = False) -> dict:
+        """Fetch a URL and return readable text, tables, references and credibility info.
+
+        ``respect_robots`` is used when downloading whole documents for analysis.
+        """
+        if respect_robots and not self.allowed_by_robots(url):
+            raise WebError(f"{url} is disallowed by the site's robots.txt — not downloading it")
+        agent = self._sec_agent() if "sec.gov" in (urllib.parse.urlparse(url).hostname or "") else USER_AGENT
+        final, ctype, body = self.get(url, agent=agent)
+        try:
+            doc = parse_document(body, urllib.parse.urlparse(final).path.rsplit("/", 1)[-1] or "page", ctype)
+        except DocumentError as e:
+            raise WebError(str(e)) from e
         if _is_bot_wall(doc):
             raise WebError(f"{final} showed a bot-check page instead of the content")
         rating = credibility.rate(final)
+        is_doc = doc.parser not in ("html", "text")
         kind = "onion" if rating["domain"].endswith(".onion") else (
-            "paper" if rating["domain"] in ("arxiv.org", "doi.org") or "pdf" in ctype else
-            "reference" if rating["domain"].endswith("wikipedia.org") else "web")
-        return {"url": final, "title": doc["title"] or final, "published": doc.get("published", ""),
-                "text": doc["text"][:MAX_TEXT], "kind": kind, **rating}
+            "filing" if rating["domain"] == "sec.gov" else
+            "paper" if rating["domain"] in ("arxiv.org", "doi.org") or doc.parser in ("docling", "pypdf") else
+            "reference" if rating["domain"].endswith("wikipedia.org") else "document" if is_doc else "web")
+        return {"url": final, "title": doc.title or final, "published": doc.published,
+                "text": doc.text[:MAX_TEXT if not is_doc else MAX_DOC_TEXT], "kind": kind,
+                "content_type": ctype, "raw": body, "document": doc, **rating}
 
 
 # ------------------------------------------------------------------- parsers
@@ -363,6 +395,59 @@ def parse_crossref(data: dict) -> list[dict]:
     return out
 
 
+def _abstract(inverted: dict | None) -> str:
+    if not inverted:
+        return ""
+    words = sorted((pos, w) for w, positions in inverted.items() for pos in positions)
+    return " ".join(w for _, w in words)
+
+
+def parse_openalex_work(w: dict) -> dict:
+    doi = (w.get("doi") or "").replace("https://doi.org/", "")
+    loc = w.get("primary_location") or {}
+    oa = w.get("best_oa_location") or {}
+    url = f"https://doi.org/{doi}" if doi else (loc.get("landing_page_url") or w.get("id", ""))
+    venue = ((loc.get("source") or {}).get("display_name")) or ""
+    authors = [(a.get("author") or {}).get("display_name", "") for a in w.get("authorships", [])]
+    out = {
+        "title": w.get("display_name") or w.get("title") or "", "url": url, "doi": doi,
+        "snippet": _abstract(w.get("abstract_inverted_index"))[:1500],
+        "published": w.get("publication_date") or str(w.get("publication_year") or ""),
+        "authors": ", ".join(a for a in authors[:4] if a), "venue": venue,
+        "cited_by_count": w.get("cited_by_count", 0), "openalex_id": w.get("id", ""),
+        "pdf_url": oa.get("pdf_url") or (w.get("open_access") or {}).get("oa_url") or "",
+        "is_retracted": bool(w.get("is_retracted")), "type": w.get("type", ""),
+        "referenced_works": w.get("referenced_works", []),
+    }
+    rating = credibility.rate(url)
+    if doi and w.get("type") in ("article", "review", "book-chapter", "book"):
+        rating = {"domain": "doi.org", "tier": 1, "tier_label": credibility.TIER_LABELS[1]}
+    if out["is_retracted"]:  # a retracted paper is not evidence
+        rating = {**rating, "tier": 4, "tier_label": "RETRACTED — do not rely on this"}
+    return {**out, **rating}
+
+
+def parse_edgar(data: dict) -> list[dict]:
+    out = []
+    for h in data.get("hits", {}).get("hits", []):
+        src = h.get("_source", {})
+        adsh, _, filename = h.get("_id", "").partition(":")
+        ciks = src.get("ciks") or []
+        if not (adsh and filename and ciks):
+            continue
+        url = f"https://www.sec.gov/Archives/edgar/data/{int(ciks[0])}/{adsh.replace('-', '')}/{filename}"
+        names = src.get("display_names") or []
+        out.append({
+            "title": f"{(names[0] if names else '').split('(CIK')[0].strip()} — {src.get('form', '')} "
+                     f"({src.get('file_date', '')})",
+            "url": url, "snippet": f"{src.get('file_type') or src.get('form', '')} filed {src.get('file_date', '')}; "
+                                   f"{', '.join(src.get('biz_locations') or [])}",
+            "published": src.get("file_date", ""), "company": names[0] if names else "",
+            "cik": ciks[0], "form": src.get("form", ""), "domain": "sec.gov", "tier": 1,
+            "tier_label": credibility.TIER_LABELS[1]})
+    return out
+
+
 def _with_rating(r: dict) -> dict:
     return {**r, **credibility.rate(r.get("url", ""))}
 
@@ -371,23 +456,13 @@ _BOT_WALLS = ("client challenge", "just a moment", "attention required", "verify
               "are you a robot", "access denied", "enable javascript and cookies")
 
 
-def _is_bot_wall(doc: dict) -> bool:
-    title = doc.get("title", "").lower()
+def _is_bot_wall(doc: Document | dict) -> bool:
+    get = doc.get if isinstance(doc, dict) else lambda k, d="": getattr(doc, k, d)
+    title, text = (get("title", "") or "").lower(), get("text", "") or ""
     return any(w in title for w in _BOT_WALLS) or (
-        len(doc.get("text", "")) < 600 and any(w in doc.get("text", "").lower() for w in _BOT_WALLS))
+        len(text) < 600 and any(w in text.lower() for w in _BOT_WALLS))
 
 
 def _charset(ctype: str) -> str:
     m = re.search(r"charset=([\w-]+)", ctype)
     return m.group(1) if m else "utf-8"
-
-
-def _pdf_text(body: bytes) -> str:
-    try:
-        from io import BytesIO
-
-        from pypdf import PdfReader
-    except ImportError as e:
-        raise WebError("reading PDFs needs the pdf extra: pip install -e '.[pdf]'") from e
-    reader = PdfReader(BytesIO(body))
-    return "\n\n".join((p.extract_text() or "") for p in reader.pages[:60])

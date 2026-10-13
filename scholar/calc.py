@@ -88,3 +88,51 @@ def scenarios(items: list[dict], startup_costs: float = 0) -> list[dict]:
                     "margin_pct": ue["margin_pct"], "payback_months": payback,
                     "assumptions": s.get("assumptions", "")})
     return out
+
+
+def _draw(rng, spec) -> float:
+    """A number, or a range [low, high] / [low, likely, high] drawn uniformly / triangularly."""
+    if isinstance(spec, (int, float)):
+        return float(spec)
+    if isinstance(spec, dict):
+        spec = [spec.get("low", 0), spec.get("likely", None), spec.get("high", 0)]
+        spec = [x for x in spec if x is not None]
+    vals = [float(x) for x in spec]
+    if len(vals) == 1:
+        return vals[0]
+    if len(vals) == 2:
+        return rng.uniform(min(vals), max(vals))
+    low, likely, high = vals[0], vals[1], vals[2]
+    return rng.triangular(min(low, high), max(low, high), likely)
+
+
+def monte_carlo(price, unit_cost, units_per_month, fees_pct=0, shipping=0, fixed_costs_per_month=0,
+                startup_costs=0, months: int = 12, runs: int = 5000, seed: int = 7) -> dict:
+    """Stress-test a business idea: every input may be a range, e.g. units_per_month=[5, 20, 60].
+
+    Returns the distribution of monthly profit and first-year cash, and the probability of losing money,
+    so a plan rests on "how likely" rather than on one optimistic guess.
+    """
+    import random
+    import statistics
+
+    rng = random.Random(seed)
+    monthly, year = [], []
+    for _ in range(max(100, min(runs, 50_000))):
+        p, c = _draw(rng, price), _draw(rng, unit_cost)
+        u, f = max(0.0, _draw(rng, units_per_month)), _draw(rng, fees_pct)
+        sh, fx = _draw(rng, shipping), _draw(rng, fixed_costs_per_month)
+        m = u * (p - c - p * f / 100 - sh) - fx
+        monthly.append(m)
+        year.append(m * months - _draw(rng, startup_costs))
+    monthly.sort()
+    year.sort()
+    pct = lambda xs, q: round(xs[min(len(xs) - 1, int(q * len(xs)))], 2)  # noqa: E731
+    return {
+        "runs": len(monthly), "months": months,
+        "monthly_profit": {"p10": pct(monthly, 0.10), "median": pct(monthly, 0.5), "p90": pct(monthly, 0.90),
+                           "mean": round(statistics.fmean(monthly), 2)},
+        "first_period_cash": {"p10": pct(year, 0.10), "median": pct(year, 0.5), "p90": pct(year, 0.90)},
+        "prob_monthly_loss": round(sum(m < 0 for m in monthly) / len(monthly), 3),
+        "prob_not_recovering_startup": round(sum(y < 0 for y in year) / len(year), 3),
+    }

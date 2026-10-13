@@ -11,7 +11,10 @@ requires-python = ">=3.10"
 dependencies = []  # core runs on the standard library + Ollama
 
 [project.optional-dependencies]
-pdf = ["pypdf>=4"]
+docs = ["docling>=2.0"]                              # layout-aware PDF/DOCX/PPTX/XLSX parsing with real tables
+pdf = ["pypdf>=4"]                                   # lightweight PDF text fallback
+analysis = ["pandas>=2", "numpy>=1.24", "matplotlib>=3.7", "openpyxl>=3.1"]   # for the Python sandbox
+all = ["docling>=2.0", "pypdf>=4", "pandas>=2", "numpy>=1.24", "matplotlib>=3.7", "openpyxl>=3.1"]
 dev = ["pytest>=8"]
 
 [project.scripts]

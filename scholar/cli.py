@@ -6,13 +6,17 @@ import argparse
 import json
 import sys
 
-from . import calc
+from pathlib import Path
+
+from . import calc, sandbox
 from .agent import CARD
 from .assistant import Assistant
 from .config import Config
 from .credibility import TIER_LABELS
-from .db import STATUSES, Store
+from .db import LESSON_KINDS, STATUSES, Store
+from .documents import docling_available
 from .llm import LLMError, Ollama
+from .memory import ResearchMemory, build_index
 from .research import DEPTHS, Researcher, to_json
 from .tools import Toolbox
 from .web import Web, WebError
@@ -48,11 +52,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("search", help="Search without the model (web, papers or wiki)")
     s.add_argument("query", nargs="+")
-    s.add_argument("--in", dest="where", choices=["web", "papers", "wiki"], default="web")
+    s.add_argument("--in", dest="where", choices=["web", "papers", "wiki", "filings"], default="web")
     s.add_argument("--limit", type=int, default=8)
-    s = sub.add_parser("read", help="Read a URL into the library and print its text")
+    s = sub.add_parser("read", help="Read a URL or document into the library (tables, references) and print it")
     s.add_argument("url")
     s.add_argument("--chars", type=int, default=3000)
+    s = sub.add_parser("citations", help="Follow a paper's citations through OpenAlex")
+    s.add_argument("doi")
+    s.add_argument("--cited-by", action="store_true", help="newer work citing it, instead of what it cites")
+    s = sub.add_parser("ingest", help="Add your own documents (file or folder) to Scholar's library")
+    s.add_argument("path")
+    s.add_argument("--tier", type=int, choices=[1, 2, 3, 4], default=2, help="how much to trust them (default 2)")
 
     f = sub.add_parser("finding", help="Findings in the library").add_subparsers(dest="action", required=True)
     a = f.add_parser("list")
@@ -78,6 +88,29 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("reports", help="List research reports")
     s = sub.add_parser("report", help="Print a report")
     s.add_argument("id", type=int)
+    sub.add_parser("investigations", help="Past investigations")
+    s = sub.add_parser("questions", help="The question tree of an investigation (or all unanswered ones)")
+    s.add_argument("investigation", type=int, nargs="?")
+    s = sub.add_parser("graph", help="The research graph: top entities, or one entity's connections")
+    s.add_argument("entity", nargs="*")
+    s = sub.add_parser("tables", help="Tables extracted from documents")
+    s.add_argument("--source", type=int)
+    s = sub.add_parser("table", help="Print one extracted table")
+    s.add_argument("id", type=int)
+    s = sub.add_parser("analyze", help="Run Python in the sandbox on extracted tables")
+    s.add_argument("script", nargs="?", help="a .py file (or use --code)")
+    s.add_argument("--code")
+    s.add_argument("--table", type=int, action="append", default=[], help="table id, copied in as T<id>.csv")
+    s = sub.add_parser("glossary", help="Terms Scholar has learned")
+    s.add_argument("term", nargs="*")
+    s = sub.add_parser("feedback", help="Teach Scholar: a preference, correction, strategy or note about a source")
+    s.add_argument("text", nargs="+")
+    s.add_argument("--kind", choices=LESSON_KINDS, default="preference")
+    s.add_argument("--report", type=int)
+    s.add_argument("--finding", type=int)
+    s = sub.add_parser("lessons", help="What Scholar has learned from your feedback")
+    s.add_argument("--retire", type=int, help="stop applying this lesson")
+    sub.add_parser("reindex", help="Rebuild semantic memory (e.g. after switching to Qdrant)")
 
     r = sub.add_parser("remember", help="Save a note")
     r.add_argument("text", nargs="+")
@@ -96,6 +129,14 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--fee-fixed", type=float, default=0)
     e.add_argument("--shipping", type=float, default=0)
     e.add_argument("--fixed", type=float, default=0, help="fixed costs per month")
+    st = sub.add_parser("stress", help="Monte Carlo stress test; each input is a value or 'low likely high'")
+    for name in ("price", "cost", "units"):
+        st.add_argument(f"--{name}", type=float, nargs="+", required=True)
+    st.add_argument("--fees-pct", type=float, nargs="+", default=[0])
+    st.add_argument("--shipping", type=float, nargs="+", default=[0])
+    st.add_argument("--fixed", type=float, nargs="+", default=[0])
+    st.add_argument("--startup", type=float, nargs="+", default=[0])
+    st.add_argument("--months", type=int, default=12)
 
     sub.add_parser("card", help="Scholar's identity card and library stats")
     s = sub.add_parser("serve", help="Run the JSON API for the rest of the family")
@@ -137,8 +178,9 @@ def main(argv: list[str] | None = None) -> int:
     config = Config()
     config.ensure_home()
     db = Store(config.db_path)
-    web = Web(config.searxng_url, config.tor_proxy)
-    tb = Toolbox(db, web)
+    web = Web(config.searxng_url, config.tor_proxy, openalex_key=config.openalex_key, contact=config.contact)
+    memory = ResearchMemory(db, build_index(config, db), config)
+    tb = Toolbox(db, web, memory, config)
     llm = Ollama(config.ollama_url, config.model)
     cmd, action = args.cmd, getattr(args, "action", None)
 
@@ -153,21 +195,31 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"(saved as report #{result['report_id']}: {result['path']})", file=sys.stderr)
         elif cmd == "search":
             q = " ".join(args.query)
-            fn = {"web": web.search, "papers": web.papers, "wiki": web.wikipedia}[args.where]
-            for r in fn(q, args.limit):
-                sid = db.add_source(r["url"], r.get("title", ""), r.get("domain", ""),
-                                    {"web": "web", "papers": "paper", "wiki": "reference"}[args.where],
-                                    r.get("tier", 3), r.get("snippet", ""), r.get("published", ""))
-                print(f"[S{sid}] tier {r['tier']}  {r.get('title', '')}\n      {r['url']}")
-                if r.get("snippet"):
-                    print(f"      {r['snippet'][:200]}")
+            fn = {"web": web.search, "papers": web.papers, "wiki": web.wikipedia,
+                  "filings": lambda q, n: web.filings(q, limit=n)}[args.where]
+            _print_hits(db, fn(q, args.limit), {"papers": "paper", "wiki": "reference"}.get(args.where, args.where))
+        elif cmd == "citations":
+            _print_hits(db, (web.cited_by if args.cited_by else web.references_of)(args.doi, 15), "paper")
+        elif cmd == "ingest":
+            for r in memory.ingest(args.path, args.tier):
+                if "error" in r:
+                    print(f"✗ {r['file']}: {r['error']}")
+                else:
+                    print(f"✓ [S{r['source_id']}] {r['file']} — {r['parser']}, {r['chunks']} passages, "
+                          f"{len(r['tables'])} tables" + ("" if r["indexed"] else " (keyword search only)"))
         elif cmd == "read":
-            doc = web.read(args.url)
-            sid = db.add_source(doc["url"], doc["title"], doc["domain"], doc["kind"], doc["tier"],
-                                doc["text"], doc["published"])
-            print(f"[S{sid}] {doc['title']}\n{doc['url']}\ntier {doc['tier']}: {doc['tier_label']}"
-                  + (f" · published {doc['published']}" if doc["published"] else "") + "\n")
-            print(doc["text"][:args.chars])
+            from .tools import call
+            r = json.loads(call(tb, "read_source", {"url": args.url, "max_chars": args.chars}))
+            if "error" in r:
+                raise WebError(r["error"])
+            print(f"[S{r['source_id']}] {r['title']}\n{r['url']}\ntier {r['tier']}: {r['tier_label']}"
+                  + (f" · published {r['published']}" if r["published"] else "") + f" · parsed by {r['parser']}")
+            for t in r["tables"]:
+                print(f"  table T{t['table_id']}: {t['caption'] or 'untitled'} ({t['rows']}×{t['cols']})")
+            refs = r["references"]
+            if refs["dois"] or refs["arxiv"]:
+                print(f"  cites {len(refs['dois'])} DOIs, {len(refs['arxiv'])} arXiv papers")
+            print("\n" + r["text"])
         elif cmd == "finding":
             if action == "list":
                 _print_rows(db.findings(" ".join(args.query), 50, args.status),
@@ -182,6 +234,12 @@ def main(argv: list[str] | None = None) -> int:
                     s = db.get_source(i)
                     if s:
                         print(f"  [S{i}] tier {s['tier']}  {s['title']}  {s['url']}")
+                for e in db.evidence(f["id"]):
+                    mark = "+" if e["stance"] == "supports" else "−"
+                    check = "✓" if e["quote_ok"] else "?"
+                    print(f"  {mark} [S{e['source_id']}] {check} \"{e['quote'][:140]}\"")
+                if f["checks"]:
+                    print("\nSkeptic's flags:\n" + "\n".join(f"  - {c}" for c in f["checks"]))
                 print("\nHistory:")
                 for h in db.finding_history(f["id"]):
                     print(f"  {h['changed_at']}  {h['status']:<10} {h['confidence']:.0%}  {h['reason']}")
@@ -197,6 +255,58 @@ def main(argv: list[str] | None = None) -> int:
         elif cmd == "report":
             r = db.get_report(args.id)
             print(r["body"] if r else "not found")
+        elif cmd == "investigations":
+            _print_rows(db.investigations(50), ["id", "status", "depth", "questions", "open", "created_at", "question"])
+        elif cmd == "questions":
+            rows = db.questions(args.investigation) if args.investigation else db.questions(status="unanswered", limit=100)
+            _print_rows(rows, ["id", "investigation_id", "status", "origin", "dimension", "text"], 90)
+        elif cmd == "graph":
+            name = " ".join(args.entity)
+            if not name:
+                _print_rows(db.entities(limit=40), ["id", "type", "sources", "name"])
+            else:
+                n = db.neighbors(name) or next((db.neighbors(e["id"]) for e in db.entities(name, 1)), {})
+                if not n:
+                    print("not in the graph yet")
+                    return 1
+                print(f"{n['name']} ({n['type']}) — mentioned in {len(n['source_ids'])} sources")
+                for r_ in n["relations"]:
+                    print(f"  {r_['subject']} —{r_['predicate'].replace('_', ' ')}→ {r_['object']}"
+                          + (f" ({r_['date']})" if r_["date"] else "") + (f" [S{r_['source_id']}]" if r_["source_id"] else ""))
+        elif cmd == "tables":
+            _print_rows(db.tables(args.source), ["id", "source_id", "n_rows", "n_cols", "caption"])
+        elif cmd == "table":
+            t = db.get_table(args.id)
+            print(f"T{t['id']} from [S{t['source_id']}] {t['caption']}\n{t['csv_path']}\n\n{t['preview']}" if t else "not found")
+        elif cmd == "analyze":
+            code = args.code or (Path(args.script).read_text() if args.script else None)
+            if not code:
+                print("give a script file or --code", file=sys.stderr)
+                return 1
+            inputs = {f"T{t}.csv": db.get_table(t)["csv_path"] for t in args.table if db.get_table(t)}
+            r = sandbox.run_python(code, config.analysis_dir, inputs, timeout=config.sandbox_timeout)
+            print(r["stdout"], end="")
+            if r["stderr"]:
+                print(r["stderr"], file=sys.stderr, end="")
+            print(f"\n({'ok' if r['ok'] else 'failed'} — files in {r['workdir']})", file=sys.stderr)
+            for f in r["files"]:
+                print(f"  {f}", file=sys.stderr)
+            return 0 if r["ok"] else 1
+        elif cmd == "glossary":
+            _print_rows(db.glossary(" ".join(args.term)), ["term", "domain", "definition"], 100)
+        elif cmd == "feedback":
+            ref = f"report:{args.report}" if args.report else f"finding:{args.finding}" if args.finding else ""
+            print(f"lesson #{memory.learn(' '.join(args.text), args.kind, ref=ref)} — Scholar will apply it from now on")
+        elif cmd == "lessons":
+            if args.retire:
+                print("retired" if db.retire_lesson(args.retire) else "not found")
+            else:
+                _print_rows(db.lessons(), ["id", "kind", "origin", "ref", "created_at", "text"], 90)
+        elif cmd == "reindex":
+            print(json.dumps(memory.reindex(_progress), indent=2))
+        elif cmd == "stress":
+            print(json.dumps(calc.monte_carlo(args.price, args.cost, args.units, args.fees_pct, args.shipping,
+                                              args.fixed, args.startup, args.months), indent=2))
         elif cmd == "remember":
             print(f"saved #{db.remember(' '.join(args.text), args.topic)}")
         elif cmd == "recall":
@@ -213,16 +323,27 @@ def main(argv: list[str] | None = None) -> int:
         elif cmd == "serve":
             from .server import serve
             serve(db, Assistant(tb, llm, config), Researcher(tb, llm, config, log=_progress),
-                  args.host or config.api_host, args.port or config.api_port, config.api_token)
+                  args.host or config.api_host, args.port or config.api_port, config.api_token, memory)
         elif cmd == "doctor":
-            return doctor(config, llm, web)
+            return doctor(config, llm, web, memory)
     except (LLMError, WebError, ValueError, SyntaxError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0
 
 
-def doctor(config: Config, llm: Ollama, web: Web) -> int:
+def _print_hits(db: Store, hits: list[dict], kind: str) -> None:
+    for r in hits:
+        sid = db.add_source(r["url"], r.get("title", ""), r.get("domain", ""), kind, r.get("tier", 3),
+                            r.get("snippet", ""), r.get("published", ""))
+        extra = "".join(f" · {k} {r[k]}" for k in ("published", "cited_by_count", "form") if r.get(k))
+        flag = "  ⚠ RETRACTED" if r.get("is_retracted") else ""
+        print(f"[S{sid}] tier {r['tier']}  {r.get('title', '')}{flag}\n      {r['url']}{extra}")
+        if r.get("snippet"):
+            print(f"      {r['snippet'][:200]}")
+
+
+def doctor(config: Config, llm: Ollama, web: Web, memory: ResearchMemory | None = None) -> int:
     ok = True
     print(f"library: {config.db_path}")
     print(f"reports: {config.reports_dir}")
@@ -234,12 +355,29 @@ def doctor(config: Config, llm: Ollama, web: Web) -> int:
         print(f"  ✗ not ready — install Ollama (https://ollama.com), then: ollama pull {config.model}")
     print(f"search:  {'SearXNG at ' + config.searxng_url if config.searxng_url else 'DuckDuckGo (set SCHOLAR_SEARXNG_URL for your own SearXNG)'}")
     for label, fn in (("web search", lambda: web.search("open source research tools", 3)),
-                      ("papers", lambda: web.papers("information retrieval", 2)),
-                      ("wikipedia", lambda: web.wikipedia("Library science", 1))):
+                      ("OpenAlex", lambda: web.openalex("information retrieval", 2)),
+                      ("arXiv", lambda: web._arxiv("information retrieval", 1)),
+                      ("Crossref", lambda: web._crossref("information retrieval", 1)),
+                      ("wikipedia", lambda: web.wikipedia("Library science", 1)),
+                      ("SEC filings", lambda: web.filings("annual report", limit=1))):
         try:
             print(f"  {'✓' if fn() else '?'} {label}")
         except WebError as e:
             print(f"  ✗ {label}: {e}")
+    if not config.openalex_key:
+        print("  · OpenAlex works best with a free key: SCHOLAR_OPENALEX_KEY (https://openalex.org/settings/api)")
+    print(f"documents: {'Docling ✓ (tables, layout)' if docling_available() else 'basic parsers — for real tables: pip install -e .[docs]'}")
+    if memory is not None:
+        where = f"Qdrant at {config.qdrant_url}" if config.qdrant_url else "built-in (scholar.db)"
+        n = memory.index.add([{"kind": "probe", "ref": "doctor", "text": "probe"}])
+        memory.index.remove("probe", ["doctor"])
+        if n:
+            print(f"memory:  semantic ✓ — {config.embed_model} → {where}")
+        else:
+            print(f"memory:  keyword-only ✗ — {memory.index.error or 'unavailable'}")
+            print(f"         fix: ollama pull {config.embed_model}" + ("" if not config.qdrant_url else ", and check Qdrant is running"))
+    wrapper = sandbox._wrapper(config.analysis_dir)
+    print(f"sandbox: python {sys.version.split()[0]}, no network" + (f" + {wrapper[0]}" if wrapper else " (audit hook only)"))
     if config.tor_proxy:
         print(f"tor:     SOCKS proxy {config.tor_proxy} (.onion sources: tier 4 — {TIER_LABELS[4]})")
     else:
