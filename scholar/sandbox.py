@@ -112,8 +112,11 @@ def run_python(code: str, base_dir: Path, inputs: dict[str, str | Path] | None =
            "PYTHONHASHSEED": "0", "OPENBLAS_NUM_THREADS": "2"}
     try:
         p = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=timeout,
-                           preexec_fn=_limits(timeout, mem_mb) if os.name == "posix" else None)
+                           # CPU limit a little above the wall-clock one, so the clock decides (no race)
+                           preexec_fn=_limits(timeout + 5, mem_mb) if os.name == "posix" else None)
         ok, out, err, code_ = p.returncode == 0, p.stdout, p.stderr, p.returncode
+        if code_ in (-24, -9) and "timed out" not in err:  # SIGXCPU / SIGKILL from a resource limit
+            err += f"\nstopped: exceeded its time or memory limit ({timeout}s)"
     except subprocess.TimeoutExpired as e:
         ok, out, err, code_ = False, (e.stdout or b"").decode(errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or ""), \
             f"timed out after {timeout}s", -1

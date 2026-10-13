@@ -22,7 +22,9 @@ def test_sandbox_runs_analysis_but_blocks_escape(tmp_path):
         r = run_python(code, tmp_path / "runs", timeout=10)
         assert not r["ok"], name
     assert not outside.exists()
-    assert "timed out" in run_python("while True: pass", tmp_path / "runs", timeout=2)["stderr"]
+    for _ in range(3):  # used to race between the CPU limit and the clock limit
+        r = run_python("while True: pass", tmp_path / "runs", timeout=2)
+        assert not r["ok"] and ("timed out" in r["stderr"] or "exceeded" in r["stderr"])
 
 
 def test_documents_tables_references_appendix():

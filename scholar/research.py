@@ -882,7 +882,8 @@ class Researcher:
             f = self.db.get_finding(f["id"])
             flag = f"evidence {'only partly supports' if verdict == 'partly' else 'does not support'} the claim as stated" + \
                 (f" ({str(c.get('reason', ''))[:120]})" if c.get("reason") else "")
-            new = {"verified": "reported", "reported": "assumption" if verdict == "unsupported" else "reported"}.get(f["status"], f["status"])
+            # Unsupported: whatever it started as, the evidence doesn't say it. Partly: it can't be "verified".
+            new = "assumption" if verdict == "unsupported" else {"verified": "reported"}.get(f["status"], f["status"])
             self.db.set_checks(f["id"], f["checks"] + [flag])
             conf = min(f["confidence"], STATUS_CAP[new], 0.5 if verdict == "partly" else 0.3)
             if new != f["status"] or conf != f["confidence"]:

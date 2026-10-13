@@ -29,7 +29,9 @@ def test_parse_duckduckgo():
 def test_parse_arxiv_and_crossref():
     a = parse_arxiv(ARXIV)[0]
     assert a["title"] == "Small Models at the Edge" and a["published"] == "2024-01-02" and a["tier"] == 2
-    c = parse_crossref({"message": {"items": [{"DOI": "10.1/abc", "title": ["T"], "abstract": "<jats:p>Hi</jats:p>",
+    sw = parse_crossref({"message": {"items": [{"DOI": "10.5281/zenodo.1", "title": ["A package"], "type": "software"}]}})
+    assert sw[0]["tier"] == 3  # a DOI alone isn't peer review
+    c = parse_crossref({"message": {"items": [{"DOI": "10.1/abc", "title": ["T"], "type": "journal-article", "abstract": "<jats:p>Hi</jats:p>",
                                                "published": {"date-parts": [[2023, 5]]}, "author": [{"family": "X"}]}]}})
     assert c[0]["url"] == "https://doi.org/10.1/abc" and c[0]["snippet"] == "Hi" and c[0]["published"] == "2023-5"
 

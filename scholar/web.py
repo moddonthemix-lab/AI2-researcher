@@ -354,7 +354,7 @@ class Web:
     def _crossref(self, query: str, limit: int) -> list[dict]:
         data = self.get_json("https://api.crossref.org/works?" + urllib.parse.urlencode(
             {"query": query, "rows": limit,
-             "select": "DOI,title,abstract,published,container-title,author,URL"}))
+             "select": "DOI,title,abstract,published,container-title,author,URL,type"}))
         return parse_crossref(data)
 
     # ---- read one page or document
@@ -433,8 +433,9 @@ def parse_crossref(data: dict) -> list[dict]:
             "title": _strip_tags(" ".join(it.get("title") or [])), "url": url,
             "snippet": _strip_tags(it.get("abstract", ""))[:1500],
             "published": "-".join(str(p) for p in parts[0]), "authors": ", ".join(authors[:4]),
-            "venue": " ".join(it.get("container-title") or []),
-            "domain": "doi.org", "tier": 1, "tier_label": credibility.TIER_LABELS[1]})
+            "venue": " ".join(it.get("container-title") or []), "domain": "doi.org",
+            # A DOI alone isn't peer review: software, datasets and reports get DOIs too.
+            **_doi_tier(it.get("type", ""))})
     return out
 
 
@@ -468,6 +469,15 @@ def parse_openalex_work(w: dict) -> dict:
     if out["is_retracted"]:  # a retracted paper is not evidence
         rating = {**rating, "tier": 4, "tier_label": "RETRACTED — do not rely on this"}
     return {**out, **rating}
+
+
+_PEER_REVIEWED = {"journal-article", "proceedings-article", "book-chapter", "book", "monograph", "article",
+                  "review", "reference-entry"}
+
+
+def _doi_tier(kind: str) -> dict:
+    t = 1 if kind in _PEER_REVIEWED else 2 if kind in ("posted-content", "preprint", "report", "dissertation") else 3
+    return {"tier": t, "tier_label": credibility.TIER_LABELS[t]}
 
 
 def parse_edgar(data: dict) -> list[dict]:

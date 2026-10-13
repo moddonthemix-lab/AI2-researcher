@@ -96,7 +96,7 @@ def test_fact_check_downgrades_unsupported_claims(tb, config):
     llm.handlers["support"] = support
     d = Researcher(tb, llm, config).investigate("Are sneaker resale prices rising?", "quick")["data"]
     market = next(f for f in d["findings"] if f["claim"] == "Market is ~$10B")
-    assert market["status"] == "assumption" and market["confidence"] <= 0.3
+    assert market["status"] == "assumption" and market["confidence"] <= 0.3  # straight to assumption
     assert any(c.startswith("evidence does not support the claim") for c in market["checks"])
 
 
