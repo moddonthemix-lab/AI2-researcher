@@ -46,7 +46,7 @@ class ResearchMemory:
 
     # ------------------------------------------------------------ documents
     def store_document(self, source_id: int, doc: Document, raw: bytes | None = None,
-                       ext: str = "", title: str = "", url: str = "", tier: int = 3) -> dict:
+                       ext: str = "", title: str = "", url: str = "", tier: int = 3, domain: str = "") -> dict:
         """Keep the original, save its tables as CSV, and index its text for semantic search."""
         ddir = self.config.documents_dir
         ddir.mkdir(parents=True, exist_ok=True)
@@ -68,7 +68,7 @@ class ResearchMemory:
         chunks = chunk(doc.text)
         indexed = self.index.add([
             {"kind": "chunk", "ref": f"{source_id}:{i}", "text": c, "source_id": source_id,
-             "title": title or doc.title, "url": url, "tier": tier}
+             "title": title or doc.title, "url": url, "tier": tier, "domain": domain}
             for i, c in enumerate(chunks[:400])])
         return {"saved_to": str(saved) if saved else None, "tables": tables, "chunks": len(chunks),
                 "indexed": indexed}
@@ -88,24 +88,33 @@ class ResearchMemory:
             url = f.resolve().as_uri()
             sid = self.db.add_source(url, doc.title or f.stem, "my library", "library", tier, doc.text[:400_000],
                                      doc.published)
-            info = self.store_document(sid, doc, title=doc.title or f.stem, url=url, tier=tier)
+            info = self.store_document(sid, doc, title=doc.title or f.stem, url=url, tier=tier, domain="my library")
             out.append({"file": str(f), "source_id": sid, "parser": doc.parser, **info})
         return out
 
-    def search_library(self, query: str, limit: int = 8) -> list[dict]:
-        """Passages from documents (yours and downloaded ones) by meaning; FTS fallback."""
-        hits = self.index.search(query, limit, kinds=["chunk"], min_score=0.3)
+    def search_library(self, query: str, limit: int = 8, own_only: bool = False) -> list[dict]:
+        """Passages from documents by meaning (keyword fallback).
+
+        ``own_only`` limits the result to the boss's ingested documents — what research rounds use, since
+        sources found on the web in this same investigation are already in its search results.
+        """
+        hits = self.index.search(query, limit * (3 if own_only else 1), kinds=["chunk"], min_score=0.3)
+        if own_only:
+            hits = [h for h in hits if h.get("domain") == "my library"][:limit]
         if hits:
             return [{"source_id": h["source_id"], "title": h.get("title", ""), "url": h.get("url", ""),
-                     "tier": h.get("tier", 3), "score": h["score"], "text": h["text"]} for h in hits]
+                     "domain": h.get("domain", ""), "tier": h.get("tier", 3), "score": h["score"],
+                     "text": h["text"]} for h in hits]
         out = []
-        for s in self.db.sources(query, limit):
+        for s in self.db.sources(query, limit * (4 if own_only else 1)):
+            if own_only and s["kind"] != "library":
+                continue
             text = s.get("text") or ""
             words = [w for w in re.findall(r"\w{4,}", query.lower())]
             pos = min((text.lower().find(w) for w in words if w in text.lower()), default=0)
-            out.append({"source_id": s["id"], "title": s["title"], "url": s["url"], "tier": s["tier"],
-                        "score": None, "text": text[max(0, pos - 300):pos + 900]})
-        return out
+            out.append({"source_id": s["id"], "title": s["title"], "url": s["url"], "domain": s["domain"],
+                        "tier": s["tier"], "score": None, "text": text[max(0, pos - 300):pos + 900]})
+        return out[:limit]
 
     # ------------------------------------------------------------- indexing
     def remember_finding(self, f: dict) -> None:
@@ -158,7 +167,7 @@ class ResearchMemory:
             if s.get("text") and len(s["text"]) > 200:
                 log(f"indexing [S{s['id']}] {s['title'][:60]}")
                 self.index.add([{"kind": "chunk", "ref": f"{s['id']}:{i}", "text": c, "source_id": s["id"],
-                                 "title": s["title"], "url": s["url"], "tier": s["tier"]}
+                                 "title": s["title"], "url": s["url"], "tier": s["tier"], "domain": s["domain"]}
                                 for i, c in enumerate(chunk(s["text"])[:400])])
                 n += 1
         counts["sources"] = n

@@ -94,9 +94,14 @@ def test_grade_rules():
     assert grade([99], srcs, set()) == "assumption"
     assert grade([1], srcs, {1}) == "verified"           # primary with a checked quote
     assert grade([1], srcs, set()) == "reported"         # primary but quote unchecked
-    assert grade([2, 3], srcs, set()) == "verified"      # two independent domains
-    assert grade([3, 4], srcs, set()) == "reported"      # tier 4 doesn't count toward corroboration
-    assert grade([2, 3], srcs, set(), conflicting=True) == "disputed"
+    assert grade([2, 3], srcs, {3}) == "verified"        # two independent domains, a quote that checks out
+    assert grade([2, 3], srcs, set()) == "reported"      # ...but no quote could be confirmed
+    assert grade([3, 4], srcs, {3, 4}) == "reported"     # tier 4 doesn't count toward corroboration
+    assert grade([2, 3], srcs, {3}, conflicting=True) == "disputed"
+    # Regression (live run): the model cited a paper that returned 403 and yielded no evidence.
+    # It must not count as the "second independent source".
+    assert grade([1, 3], srcs, {3}, evidence={3}) == "reported"
+    assert grade([1], srcs, {1}, evidence=set()) == "assumption"
 
 
 def test_skeptic_checks():

@@ -131,7 +131,7 @@ def _read_source(tb: Toolbox, url: str = "", source_id: int | None = None, max_c
     is_doc = d.parser not in ("html", "text") or doc["kind"] == "filing"
     stored = tb.memory.store_document(
         sid, d, doc["raw"] if is_doc and tb.web.allowed_by_robots(doc["url"]) else None,
-        ".pdf" if d.parser in ("docling", "pypdf") else ".htm", doc["title"], doc["url"], doc["tier"])
+        ".pdf" if d.parser in ("docling", "pypdf") else ".htm", doc["title"], doc["url"], doc["tier"], doc["domain"])
     text = doc["text"]
     if find:
         pos = text.lower().find(find.lower())

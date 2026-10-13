@@ -29,6 +29,7 @@ def test_documents_tables_references_appendix():
     html = b"""<html><title>Report</title><body><h2>Results</h2><p>Revenue grew strongly in every region we measured.</p>
     <table><caption>Table 1: Revenue</caption><tr><th>Year</th><th>Rev</th></tr><tr><td>2024</td><td>1,200</td></tr></table>
     <table><tr><td>layout only</td></tr></table>
+    <table class="navbox"><tr><td>Nav</td><td>links</td></tr><tr><td>More</td><td>links</td></tr></table>
     <h2>References</h2><p>doi:10.1038/s41586-020-2649-2. arXiv:2401.01234v2 and https://doi.org/10.1126/science.abc123.</p>
     <h2>Appendix A</h2><p>Robustness checks with an alternative sample of 500 firms are reported here.</p></body></html>"""
     d = parse(html, "r.html")

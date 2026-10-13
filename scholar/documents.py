@@ -121,7 +121,10 @@ class _HTML(HTMLParser):
             if key and a.get("content"):
                 self.meta[key] = a["content"]
         elif tag == "table":
-            self._tables.append({"rows": [], "row": None, "caption": ""})
+            cls = (a.get("class") or "").lower()
+            junk = any(k in cls for k in ("navbox", "infobox", "sidebar", "metadata", "ambox", "vertical-navbox",
+                                          "mw-collapsible", "nowraplinks", "toc"))
+            self._tables.append({"rows": [], "row": None, "caption": "", "junk": junk})
         elif tag == "tr" and self._tables:
             self._tables[-1]["row"] = []
         elif tag == "caption" and self._tables:
@@ -156,7 +159,7 @@ class _HTML(HTMLParser):
             t = self._tables.pop()
             table = Table(t["rows"], t["caption"])
             r, c = table.shape
-            if r >= 2 and c >= 2:  # skip layout tables
+            if r >= 2 and c >= 2 and not t.get("junk"):  # skip layout and navigation tables
                 self.tables.append(table)
         if tag in self.BLOCK:
             self.parts.append("\n")

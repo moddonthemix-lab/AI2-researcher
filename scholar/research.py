@@ -55,6 +55,8 @@ _BUSINESS_WORDS = re.compile(r"\b(business|market|sell|selling|resell|resale|inc
                              r"customers?|pricing|price|revenue|niche|opportunit|side hustle|product|brand|"
                              r"wholesale|ecommerce|e-commerce|subscription|saas|franchise|margin)", re.I)
 BACKENDS = ("web", "papers", "wiki", "filings", "library")
+_COMPANY_WORDS = re.compile(r"\b(sec|10-k|10-q|filings?|annual reports?|compan(y|ies)|corporat\w*|suppliers?|"
+                            r"subsidiar\w*|publicly traded|listed|inc\.?|ticker|investors?)\b", re.I)
 STATUS_CAP = {"verified": 0.95, "reported": 0.7, "disputed": 0.5, "assumption": 0.4, "refuted": 0.1}
 WINDOW = 7500          # characters of a source shown to the model at once
 OUTDATED_YEARS = 3     # numbers older than this get flagged by the skeptic
@@ -218,13 +220,20 @@ def _dedupe(items: list[str], seen: set[str]) -> list[str]:
 
 
 def grade(source_ids: list[int], sources: dict[int, dict], checked: set[int],
-          conflicting: bool = False) -> str:
-    """Status from evidence, decided by code. ``checked`` = sources with a verified quote."""
-    ids = [i for i in source_ids if i in sources]
+          conflicting: bool = False, evidence: set[int] | None = None) -> str:
+    """Status from evidence, decided by code.
+
+    ``checked`` = sources with a quote found in their text; ``evidence`` = sources that actually yielded
+    extracted facts (a source the model cites but that gave no evidence — e.g. it couldn't be read —
+    counts for nothing). Verified needs a checked quote AND either a primary source or two domains.
+    """
+    ids = [i for i in source_ids if i in sources and (evidence is None or i in evidence)]
     if not ids:
         return "assumption"
     if conflicting:
         return "disputed"
+    if not any(i in checked for i in ids):
+        return "reported"
     domains = {sources[i]["domain"] for i in ids if sources[i]["tier"] <= 3}
     primary = any(sources[i]["tier"] == 1 and i in checked for i in ids)
     return "verified" if primary or len(domains) >= 2 else "reported"
@@ -311,7 +320,8 @@ class Researcher:
                         added += 1
         if not added:  # model gave nothing usable
             qid = self.db.add_question(inv, restated, None, "", 1, "plan")
-            self._queries[qid] = [{"q": question, "where": w} for w in ("web", "wiki", "papers")]
+            wheres = ("web", "wiki", "papers") + (("filings",) if _COMPANY_WORDS.search(question) else ())
+            self._queries[qid] = [{"q": question if w != "filings" else _short(question, 60), "where": w} for w in wheres]
         return restated
 
     @staticmethod
@@ -336,9 +346,10 @@ class Researcher:
             elif where == "filings":
                 results, kind = self.tb.web.filings(q, limit=n), "filing"
             elif where == "library":
-                results = [{"title": c["title"], "url": c["url"], "snippet": c["text"], "domain": "my library",
-                            "tier": c["tier"], "source_id": c["source_id"], "library_text": c["text"]}
-                           for c in self.memory.search_library(q, n)]
+                results = [{"title": c["title"], "url": c["url"], "snippet": c["text"],
+                            "domain": c.get("domain") or "my library", "tier": c["tier"],
+                            "source_id": c["source_id"], "library_text": c["text"]}
+                           for c in self.memory.search_library(q, n, own_only=True)]
                 kind = "library"
             else:
                 results, kind = self.tb.web.search(q, n), "web"
@@ -390,7 +401,7 @@ class Researcher:
                                  doc["published"] or hit.get("published", ""))
         ext = ".pdf" if d.parser in ("docling", "pypdf") else ".htm" if doc["kind"] == "filing" else ""
         stored = self.memory.store_document(sid, d, doc["raw"] if is_document else None, ext if is_document else "",
-                                            doc["title"], doc["url"], tier)
+                                            doc["title"], doc["url"], tier, doc["domain"])
         if stored["tables"]:
             self.log(f"    saved {len(stored['tables'])} tables from [S{sid}]")
         return {**hit, "id": sid, "url": doc["url"], "domain": doc["domain"], "tier": tier,
@@ -499,7 +510,7 @@ class Researcher:
                     hits += self.search(spec["q"], spec["where"], budget["per_query"], inv, q["id"])
             hits += self.search(restated, "library", 3, inv, None)  # always check the boss's own library
             if len({h["url"] for h in hits} - read_urls) < 3:  # engines down or thin: widen
-                for where in ("papers", "wiki", "web"):
+                for where in ("papers", "wiki", "web") + (("filings",) if _COMPANY_WORDS.search(question) else ()):
                     hits += self.search(_short(restated), where, budget["per_query"], inv, None)
             round_reads = max(2, reads_left // (budget["rounds"] - rnd + 1))
             for h in self.choose(hits, round_reads, read_urls):
@@ -640,8 +651,9 @@ class Researcher:
         for kf in _list(synth.get("key_findings"))[:12]:
             if not kf.get("claim"):
                 continue
-            ids = _ids(kf.get("source_ids", []))
-            status = grade(ids, sources, checked, bool(kf.get("conflicting")))
+            evidence_ids = {f["source_id"] for f in facts}
+            ids = [i for i in _ids(kf.get("source_ids", [])) if i in evidence_ids]
+            status = grade(ids, sources, checked, bool(kf.get("conflicting")), evidence_ids)
             try:
                 conf = float(kf.get("confidence", 0.5))
             except (TypeError, ValueError):
@@ -670,6 +682,8 @@ class Researcher:
             for s in specs[:2]:
                 hits += self.search(s["q"], s["where"] if s["where"] in ("web", "papers", "filings") else "web",
                                     4, inv, None)
+            if not hits:  # the web engine may be down: the literature is the next best place to look
+                hits = self.search(_short(f["claim"], 80), "papers", 4, inv, None)
             contra, weak = [], []
             for h in self.choose(hits, 2, read_urls):
                 if reads_left <= 0:
@@ -720,6 +734,9 @@ class Researcher:
         elif status == "verified" and "single source" in flags and any(x.startswith("possibly outdated") for x in flags):
             status = "reported"
             reason.append("single, possibly outdated source")
+        elif status == "verified" and "supporting quote not found in the source" in flags:
+            status = "reported"
+            reason.append("supporting quotes could not be confirmed")
         penalties = len([x for x in flags if not x.startswith("contradicting")])
         conf = max(0.05, min(f["confidence"] - 0.1 * penalties, STATUS_CAP[status]))
         self.db.set_checks(f["id"], flags)
