@@ -1039,7 +1039,8 @@ def render(d: dict) -> str:
         if flagged:
             out += ["## Skeptic's review", "", "_A separate pass tried to disprove each finding._", ""]
             for f in flagged:
-                out.append(f"- **F{f['id']}** {f['claim'][:100]}")
+                claim = f["claim"] if len(f["claim"]) <= 110 else f["claim"][:110].rsplit(" ", 1)[0] + "…"
+                out.append(f"- **F{f['id']}** {claim}")
                 out += [f"  - {c}" for c in f["checks"]]
             out.append("")
     if d["mode"] == "plan":

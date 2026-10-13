@@ -47,7 +47,8 @@ def _require(module: str):
 
 def speakable(text: str, max_sentences: int = 4) -> str:
     """Turn a written answer into something good to hear."""
-    t = re.sub(r"\[S\d+\]|\bF\d+\b|\(S\d+(, ?S\d+)*\)", "", text or "")       # citations, finding ids
+    t = re.sub(r"[\[(](?:\s*[SFT]\d+\s*[,;]?)+[\])]", "", text or "")                 # [S3], [F1, S1, S11], (S2)
+    t = re.sub(r"\b[SF]\d+\b", "", t)                                                 # stray S12 / F3
     t = re.sub(r"[(\[]?\s*(?:[—–-]\s*)?(?:see\s+|at\s+|via\s+)?<?https?://[^\s>)\]]+>?[)\]]?", "", t, flags=re.I)  # links
     t = re.sub(r"```.*?```", " ", t, flags=re.S)                                 # code
     t = re.sub(r"^\s*\|.*\|\s*$", "", t, flags=re.M)                             # tables
@@ -200,6 +201,28 @@ def wav_to_array(data: bytes):
         n = int(len(audio) * SAMPLE_RATE / rate)
         audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio).astype("float32")
     return audio
+
+
+def to_rate(wav: bytes, rate: int = SAMPLE_RATE) -> bytes:
+    """Resample a WAV to ``rate`` Hz, 16-bit mono (what an ESP32's I2S speaker plays most easily)."""
+    np = _require("numpy")
+    with wave.open(io.BytesIO(wav)) as w:
+        if w.getframerate() == rate and w.getnchannels() == 1 and w.getsampwidth() == 2:
+            return wav
+        src_rate = w.getframerate()
+    audio = wav_to_array(wav)  # → 16 kHz float32
+    if rate != SAMPLE_RATE and len(audio):
+        n = int(len(audio) * rate / SAMPLE_RATE)
+        audio = np.interp(np.linspace(0, len(audio) - 1, n), np.arange(len(audio)), audio)
+    pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    del src_rate
+    return out.getvalue()
 
 
 def wav_info(data: bytes) -> dict:

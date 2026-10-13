@@ -24,6 +24,7 @@ def test_speakable_strips_citations_links_and_markdown():
     assert "[S" not in out and "http" not in out and "|" not in out and "**" not in out and "F12" not in out
     assert out.startswith("Answer Prices rose about 12 percent in 2025")
     assert out.endswith("The full details are on screen.")
+    assert speakable("Suppliers matter [F1, S1, S11]. Quantities may differ (S2).") == "Suppliers matter. Quantities may differ."
     assert speakable("It reached $412 million, or $240 a pack — see <https://x.org/y>.") == \
         "It reached 412 million dollars, or 240 dollars a pack."
 
@@ -81,3 +82,9 @@ def test_voice_endpoints_for_an_esp32_terminal():
             assert e.code == 400
     finally:
         httpd.shutdown()
+
+
+def test_to_rate_for_esp32_speakers():
+    from scholar.voice import to_rate
+    out = to_rate(_wav(1.0, rate=22050), 16000)
+    assert wav_info(out) == {"channels": 1, "rate": 16000, "seconds": 1.0}

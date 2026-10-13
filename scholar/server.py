@@ -209,10 +209,15 @@ def make_handler(store: Store, assistant: Assistant | None, researcher: Research
                 return self._send(503, {"error": "voice not configured"})
             try:
                 if path == "/api/speak":
-                    text = text if text is not None else self._body().get("text", "")
+                    body = {} if text is not None else self._body()
+                    text = text if text is not None else body.get("text", "")
                     if not text:
                         return self._send(400, {"error": "send {\"text\": \"...\"}"})
-                    return self._send_bytes(200, voice.synthesize(text), "audio/wav")
+                    wav = voice.synthesize(text)
+                    if str(body.get("rate", "")).isdigit():  # e.g. 16000 for an ESP32 speaker
+                        from .voice import to_rate
+                        wav = to_rate(wav, int(body["rate"]))
+                    return self._send_bytes(200, wav, "audio/wav")
                 audio = self._raw()  # /api/listen: the body is a WAV recording
                 try:
                     info = wav_info(audio)
