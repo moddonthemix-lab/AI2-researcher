@@ -20,7 +20,8 @@ import re
 import time
 
 from .llm import LLMError, Ollama, parse_json
-from .research import EXTRACT_PROMPT, GUARD, SCHEMAS, SUPPORT_PROMPT, SYNTH_PROMPT, quote_found, unsupported_numbers
+from .research import (EXTRACT_PROMPT, GUARD, SCHEMAS, SUPPORT_PROMPT, SYNTH_PROMPT, quote_found, support_schema,
+                       unsupported_numbers)
 
 DOCS = [
     {
@@ -64,13 +65,13 @@ DOCS = [
     },
 ]
 
-SUPPORT_ITEMS = [  # (claim, quote, correct verdict)
+SUPPORT_ITEMS = [  # (claim, quote, acceptable verdicts)
     ("Kestrel Lithium supplied 61 percent of Northwind's lithium carbonate in 2024.",
-     "In 2024, Kestrel Lithium supplied 61 percent of our lithium carbonate", "supported"),
-    ("The refurbished e-bike battery market reached $412 million in 2026.",
-     "the US market for refurbished e-bike batteries reached $412 million in 2025", "partly"),
-    ("Most online resellers lose money.",
-     "22 percent of resellers reported losing money over the previous twelve months", "unsupported"),
+     "In 2024, Kestrel Lithium supplied 61 percent of our lithium carbonate", ("supported",)),
+    ("The refurbished e-bike battery market reached $412 million in 2026.",   # wrong year
+     "the US market for refurbished e-bike batteries reached $412 million in 2025", ("partly", "unsupported")),
+    ("Most online resellers lose money.",                                        # 22% is not "most"
+     "22 percent of resellers reported losing money over the previous twelve months", ("unsupported",)),
 ]
 
 
@@ -81,10 +82,10 @@ def _numbers(text: str) -> set[str]:
 def bench_model(llm: Ollama, log=print) -> dict:
     calls = []
 
-    def call(prompt: str, step: str, think=None) -> dict:
+    def call(prompt: str, step: str, think=None, schema=None) -> dict:
         start = time.monotonic()
         msg = llm.chat([{"role": "system", "content": GUARD}, {"role": "user", "content": prompt}],
-                       schema=SCHEMAS[step], think=think)
+                       schema=schema or SCHEMAS[step], think=think)
         calls.append({**llm.last, "seconds": round(time.monotonic() - start, 1), "step": step})
         return parse_json(msg.get("content", ""))
 
@@ -105,14 +106,10 @@ def bench_model(llm: Ollama, log=print) -> dict:
             + (f", invented {sorted(invented)}" if invented else "") + (" — FELL FOR THE TRAP" if trapped else ""))
 
     items = "\n".join(f'F{n}: {c}\n  - [S{n}] "{q}"' for n, (c, q, _) in enumerate(SUPPORT_ITEMS, 1))
-    data = call(SUPPORT_PROMPT.format(items=items), "support")
-    verdicts = {}
-    for c in data.get("checks", []):
-        if isinstance(c, dict):
-            fid = re.sub(r"\D", "", str(c.get("finding_id", "")))  # same parsing as research (F2 → 2)
-            if fid:
-                verdicts[int(fid)] = str(c.get("verdict", "")).lower()
-    judgement = sum(verdicts.get(n) == want for n, (_, _, want) in enumerate(SUPPORT_ITEMS, 1)) / len(SUPPORT_ITEMS)
+    data = call(SUPPORT_PROMPT.format(items=items), "support", schema=support_schema(len(SUPPORT_ITEMS)))
+    checks = [c for c in data.get("checks", []) if isinstance(c, dict)]  # matched by position, as in research
+    verdicts = {n: str(c.get("verdict", "")).lower() for n, c in enumerate(checks, 1)}
+    judgement = sum(verdicts.get(n) in ok for n, (_, _, ok) in enumerate(SUPPORT_ITEMS, 1)) / len(SUPPORT_ITEMS)
     log(f"    fact-check: {judgement:.0%} correct ({', '.join(verdicts.get(n, '-') for n in range(1, 4))})")
 
     evidence = ("Q: How dependent is Northwind on Kestrel?\n"

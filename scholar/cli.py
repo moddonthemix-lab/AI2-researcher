@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     web = Web(config.searxng_url, config.tor_proxy, openalex_key=config.openalex_key, contact=config.contact)
     memory = ResearchMemory(db, build_index(config, db), config)
     tb = Toolbox(db, web, memory, config)
-    llm = Ollama(config.ollama_url, config.model, config.llm_timeout, config.num_ctx, think=config.think)
+    llm = Ollama(config.ollama_url, config.model, config.llm_timeout, config.num_ctx, think=config.think == "all")
     fast = llm if config.fast_model == config.model else \
         Ollama(config.ollama_url, config.fast_model, config.llm_timeout, config.num_ctx)
     cmd, action = args.cmd, getattr(args, "action", None)
@@ -424,7 +424,8 @@ def doctor(config: Config, llm: Ollama, web: Web, memory: ResearchMemory | None 
         if role == "reader" and m is llm:
             print("reader:  same model as the thinker")
             continue
-        print(f"{role}: {m.model} via {config.ollama_url}" + ("  (thinking on)" if role == "thinker" and config.think else ""))
+        print(f"{role}: {m.model} via {config.ollama_url}"
+              + (f"  (thinking: {config.think})" if role == "thinker" else ""))
         if m.available():
             print("  ✓ Ollama is reachable and the model is installed")
         else:

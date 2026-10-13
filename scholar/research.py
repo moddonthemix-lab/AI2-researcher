@@ -168,8 +168,8 @@ actually supports the claim AS STATED — same numbers, dates, place, product an
 about a different year or a narrower claim only "partly" supports it; a quote on a related topic that does
 not state the claim is "unsupported".
 {items}
-Answer every finding. finding_id is the number after F (F7 → 7).
-Return JSON only: {{"checks": [{{"finding_id": 7, "verdict": "supported|partly|unsupported", "reason": "..."}}]}}"""
+Give exactly one check per finding, in the same order as listed.
+Return JSON only: {{"checks": [{{"finding_id": <its number>, "verdict": "supported|partly|unsupported", "reason": "..."}}]}}"""
 
 
 # Exact answer layouts. Ollama constrains the model to these, so even a small model can't return
@@ -218,6 +218,9 @@ SCHEMAS = {
 # The reader pulls facts out of every source (many calls → the fast model); everything that needs
 # judgement goes to the thinker.
 FAST_STEPS = {"extract", "skeptic_read"}
+# Judgement calls where step-by-step reasoning measurably helps (see `scholar bench`), and that happen once
+# per investigation, so thinking costs minutes, not hours, on a CPU.
+THINK_STEPS = {"support"}
 
 
 # ----------------------------------------------------------------- helpers
@@ -227,6 +230,13 @@ def _norm(s: str) -> str:
 
 _PLACEHOLDERS = {"search engine query", "search query", "official statistics", "counter evidence", "query", "",
                  "the question made precise", "q"}
+
+
+def support_schema(n: int) -> dict:
+    """Exactly ``n`` checks, so answers can be matched to findings by position (small models
+    copy example ids instead of echoing the real ones)."""
+    item = SCHEMAS["support"]["properties"]["checks"]["items"]
+    return _obj({"checks": {"type": "array", "items": item, "minItems": n, "maxItems": n}})
 
 
 def _ids(raw) -> list[int]:
@@ -348,10 +358,12 @@ class Researcher:
         self.memory = memory or getattr(toolbox, "memory", None) or ResearchMemory(self.db, None, self.config)
         self._queries: dict[int, list[dict]] = {}
 
-    def _json(self, prompt: str, step: str) -> dict:
+    def _json(self, prompt: str, step: str, schema: dict | None = None) -> dict:
         llm = self.fast if step in FAST_STEPS else self.llm
+        mode = getattr(self.config, "think", "checks")
+        think = False if step in FAST_STEPS else (mode == "all" or (mode == "checks" and step in THINK_STEPS))
         msg = llm.chat([{"role": "system", "content": GUARD}, {"role": "user", "content": prompt}],
-                       schema=SCHEMAS[step], think=False if step in FAST_STEPS else None)
+                       schema=schema or SCHEMAS[step], think=think)
         st = getattr(llm, "last", None)
         if isinstance(st, dict) and st.get("seconds"):
             self.log(f"    ↳ {step} ({st.get('model', '?')}): {st['prompt_tokens']} tokens in, "
@@ -836,19 +848,17 @@ class Researcher:
 
     def _support_check(self, findings: list[dict]) -> None:
         """Does each quote actually say what the claim says? (A real quote can still be beside the point.)"""
-        items, by_id = [], {}
+        items, order = [], []
         for f in findings:
             quotes = [e for e in self.db.evidence(f["id"]) if e["stance"] == "supports" and e["quote_ok"]][:3]
             if quotes:
-                by_id[f["id"]] = f
+                order.append(f)
                 items.append(f"F{f['id']}: {f['claim']}\n" + "\n".join(f'  - [S{e["source_id"]}] "{e["quote"]}"' for e in quotes))
         if not items:
             return
         self.log(f"checking that the evidence really supports {len(items)} findings…")
-        data = self._json(SUPPORT_PROMPT.format(items="\n".join(items)), "support")
-        for c in _list(data.get("checks")):
-            fid = _ids([c.get("finding_id")])
-            f = by_id.get(fid[0]) if fid else None
+        data = self._json(SUPPORT_PROMPT.format(items="\n".join(items)), "support", support_schema(len(order)))
+        for f, c in zip(order, _list(data.get("checks"))):  # matched by position, not by echoed id
             verdict = str(c.get("verdict", "")).lower()
             if not f or verdict not in ("partly", "unsupported"):
                 continue

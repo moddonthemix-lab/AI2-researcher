@@ -239,8 +239,9 @@ model has to read and write**, and writing is the slowest part. Scholar is built
   shown; synthesis gets the best evidence first (confirmed quotes, credible sources) up to the budget.
 - **A fact-check step.** The thinker confirms each quote really says what the claim says (a real quote
   can still be beside the point); unsupported claims are downgraded.
-- **Thinking off by default.** Reasoning models like Qwen3 "think out loud" first, which on a CPU can mean
-  minutes per call. `SCHOLAR_THINK=1` turns it on for the thinker if you'd rather wait for better answers.
+- **Thinking only where it pays.** Reasoning models like Qwen3 can "think out loud" before answering, which
+  on a CPU can mean minutes per call. By default the thinker reasons step by step only for the fact-check (one
+  call per investigation, where it measurably helps); `SCHOLAR_THINK=all` uses it for every thinker step, `off` never.
 
 | Profile | For | Thinker / reader | Context · read per source |
 |---|---|---|---|
@@ -272,8 +273,18 @@ Measured on a 4-core CPU-only cloud machine with 15GB RAM, a close stand-in for 
 
 All three found every key fact; the differences were honesty and judgement. A model that obeys
 instructions hidden in a page can't be trusted to read the web, so `bench` never recommends one. (The
-judgement scores in this run were understated by a bug in the fact-check prompt, since fixed; source-reading
-times were measured before the reader's output was trimmed.)
+judgement scores in that run were understated by a bug in the fact-check prompt, since fixed; source-reading
+times were measured before the reader's output was trimmed: the 4B's dropped from 103s to 76s after.)
+
+After the fix, the fact-check (does each quote really support its claim?) on the same machine:
+
+| Model | Thinking | Correct | Time |
+|---|---|---:|---:|
+| qwen3:4b | off | 3/3 | 31s |
+| qwen3:8b | off | 2/3 | 43s |
+| qwen3:8b | on | 3/3 | 148s |
+
+Three items is a small test; treat it as a sign, not a verdict. It's why thinking is on for this one step.
 
 **Raspberry Pi 5.** Same code. Either run small models on the Pi itself (`SCHOLAR_PROFILE=pi`: expect
 slow, quick-depth research), or, better, let the Pi borrow a stronger machine's brain:

@@ -53,8 +53,11 @@ class Config:
     fast_model: str = field(default_factory=_p("fast_model", "SCHOLAR_FAST_MODEL"))
     num_ctx: int = field(default_factory=_p_int("num_ctx", "SCHOLAR_NUM_CTX"))
     read_chars: int = field(default_factory=_p_int("read_chars", "SCHOLAR_READ_CHARS"))
-    # Let the thinker reason step by step before answering (slower on CPU, often more accurate).
-    think: bool = field(default_factory=lambda: _env("SCHOLAR_THINK", "0").lower() in ("1", "true", "yes"))
+    # Let the thinker reason step by step before answering — slower on a CPU, more accurate on judgement calls.
+    #   checks (default): only for the fact-check (one call per investigation)   all: every thinker step   off: never
+    think: str = field(default_factory=lambda: {"1": "all", "true": "all", "yes": "all", "0": "off", "false": "off",
+                                                "no": "off"}.get(_env("SCHOLAR_THINK", "checks").lower(),
+                                                                 _env("SCHOLAR_THINK", "checks").lower()))
     llm_timeout: int = field(default_factory=lambda: int(_env("SCHOLAR_LLM_TIMEOUT", "900")))
     assistant_name: str = field(default_factory=lambda: _env("SCHOLAR_NAME", "Scholar"))
     user_name: str = field(default_factory=lambda: _env("SCHOLAR_USER", "boss"))

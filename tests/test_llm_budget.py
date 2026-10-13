@@ -87,10 +87,11 @@ def test_fast_and_smart_models_split_the_work(tb, config):
 
 
 def test_fact_check_downgrades_unsupported_claims(tb, config):
-    def support(prompt):
+    def support(prompt):  # one check per finding, in order; the ids it echoes are deliberately wrong
         import re
-        fid = int(re.search(r"F(\d+): Market is", prompt).group(1))
-        return {"checks": [{"finding_id": fid, "verdict": "unsupported", "reason": "quote is about a different market"}]}
+        claims = re.findall(r"^F\d+: (.+)$", prompt, re.M)
+        return {"checks": [{"finding_id": 7, "verdict": "unsupported" if c.startswith("Market is") else "supported",
+                            "reason": "quote is about a different market"} for c in claims]}
     llm = full_llm()
     llm.handlers["support"] = support
     d = Researcher(tb, llm, config).investigate("Are sneaker resale prices rising?", "quick")["data"]
@@ -114,3 +115,22 @@ def test_bench_never_recommends_a_model_that_fell_for_the_trap():
             {"model": "big", "score": 83, "honest": 100, "sec_per_read": 60}]
     out = recommend(rows)
     assert "tiny" not in out and "big" in out and "reader  (SCHOLAR_FAST_MODEL): mid" in out
+
+
+def test_thinking_only_on_the_fact_check_by_default(tb, config):
+    from .test_research import _extract, _gaps, _plan, _skeptic_queries, _skeptic_read, _synth
+    seen = []
+
+    class ThinkSpy(Recorder):
+        def chat(self, messages, tools=None, json_mode=False, schema=None, think=None):
+            out = super().chat(messages, tools, json_mode, schema, think)
+            seen.append((self.kinds()[-1], think))
+            return out
+    llm = ThinkSpy("one", plan=_plan, extract=_extract, synth=_synth, gaps=_gaps, skeptic_queries=_skeptic_queries,
+                   skeptic_read=_skeptic_read, support=lambda p: {"checks": []})
+    Researcher(tb, llm, config).investigate("Are sneaker resale prices rising?", "quick")
+    assert {k for k, t in seen if t} == {"support"}
+    config.think = "off"
+    seen.clear()
+    Researcher(tb, llm, config).investigate("Is sneaker resale growing?", "quick")
+    assert not any(t for _, t in seen)
