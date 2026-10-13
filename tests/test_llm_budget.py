@@ -105,3 +105,12 @@ def test_window_respects_budget_and_keeps_relevant_parts(tb, config):
     text = "Title and abstract of the report.\n\n" + filler + "\n\nKEY: resale sneaker prices rose 12 percent.\n\n" + filler
     w = r.window({"id": 1, "text": text}, {"resale", "sneaker", "prices"}, budget=2500)
     assert len(w) <= 2500 and "Title and abstract" in w and "KEY: resale sneaker prices rose" in w
+
+
+def test_bench_never_recommends_a_model_that_fell_for_the_trap():
+    from scholar.bench import recommend
+    rows = [{"model": "tiny", "score": 80, "honest": 67, "sec_per_read": 10},
+            {"model": "mid", "score": 77, "honest": 100, "sec_per_read": 30},
+            {"model": "big", "score": 83, "honest": 100, "sec_per_read": 60}]
+    out = recommend(rows)
+    assert "tiny" not in out and "big" in out and "reader  (SCHOLAR_FAST_MODEL): mid" in out

@@ -224,3 +224,8 @@ def test_failed_investigation_is_marked(tb, config):
     except RuntimeError:
         pass
     assert tb.db.investigations()[0]["status"] == "failed"
+
+
+def test_finding_ids_in_any_form():
+    from scholar.research import _ids
+    assert _ids([7, "8", "S9", "F12", "[S3]", "f 4", "x", None]) == [7, 8, 9, 12, 3, 4]

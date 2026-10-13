@@ -147,7 +147,8 @@ SKEPTIC_QUERIES_PROMPT = """You are the skeptic on Scholar's team. Your job is t
 For each finding, write 2 search queries most likely to surface contradicting evidence, newer data,
 methodology criticism, or conflicts of interest.
 {findings}
-Return JSON only: {{"queries": [{{"finding_id": 0, "queries": [{{"q": "...", "where": "web|papers|filings"}}]}}]}}"""
+finding_id is the number before the colon.
+Return JSON only: {{"queries": [{{"finding_id": 7, "queries": [{{"q": "...", "where": "web|papers|filings"}}]}}]}}"""
 
 SKEPTIC_READ_PROMPT = """You are the skeptic on Scholar's team. A preliminary finding:
 "{claim}"
@@ -167,7 +168,8 @@ actually supports the claim AS STATED — same numbers, dates, place, product an
 about a different year or a narrower claim only "partly" supports it; a quote on a related topic that does
 not state the claim is "unsupported".
 {items}
-Return JSON only: {{"checks": [{{"finding_id": 0, "verdict": "supported|partly|unsupported", "reason": "..."}}]}}"""
+Answer every finding. finding_id is the number after F (F7 → 7).
+Return JSON only: {{"checks": [{{"finding_id": 7, "verdict": "supported|partly|unsupported", "reason": "..."}}]}}"""
 
 
 # Exact answer layouts. Ollama constrains the model to these, so even a small model can't return
@@ -231,7 +233,7 @@ def _ids(raw) -> list[int]:
     """Accept [3, "7", "S9"] from the model; drop anything else."""
     out = []
     for i in raw if isinstance(raw, list) else []:
-        i = str(i).strip().lstrip("Ss[").rstrip("]")
+        i = re.sub(r"^[\[\s]*[A-Za-z]{0,2}\s*", "", str(i)).rstrip("] ")  # 7, "S7", "F7", "[S7]"
         if i.isdigit():
             out.append(int(i))
     return out

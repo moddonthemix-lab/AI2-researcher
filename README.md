@@ -261,7 +261,19 @@ scholar bench --models qwen3:4b,qwen3:8b,gpt-oss:20b
 trap). It scores fact recall, real quotes, invented numbers, falling for the trap, judging whether a quote
 supports a claim, and clean synthesis, plus reading and writing speed, then suggests a thinker and reader.
 
-BENCH_RESULTS_PLACEHOLDER
+Measured on a 4-core CPU-only cloud machine with 15GB RAM, a close stand-in for a 16GB Intel Mac
+(an 8-core i9 should be roughly 1.5–2× faster):
+
+| Model | Score | Fell for the trap? | Quotes real | Seconds per source read | Writes (tokens/s) |
+|---|---:|---|---:|---:|---:|
+| qwen2.5:1.5b | 73 | **yes** — reported the planted "$9 billion" | 100% | 69 | 16.6 |
+| qwen3:4b | 77 | no | 87% | 103 | 6.8 |
+| qwen3:8b | 83 | no | 80% | 142 | 4.2 |
+
+All three found every key fact; the differences were honesty and judgement. A model that obeys
+instructions hidden in a page can't be trusted to read the web, so `bench` never recommends one. (The
+judgement scores in this run were understated by a bug in the fact-check prompt, since fixed; source-reading
+times were measured before the reader's output was trimmed.)
 
 **Raspberry Pi 5.** Same code. Either run small models on the Pi itself (`SCHOLAR_PROFILE=pi`: expect
 slow, quick-depth research), or, better, let the Pi borrow a stronger machine's brain:
