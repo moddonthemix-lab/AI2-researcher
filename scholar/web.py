@@ -299,6 +299,8 @@ class Web:
             doc = html_to_text(body.decode(_charset(ctype), "replace"))
         else:
             doc = {"title": "", "published": "", "text": body.decode(_charset(ctype), "replace")}
+        if _is_bot_wall(doc):
+            raise WebError(f"{final} showed a bot-check page instead of the content")
         rating = credibility.rate(final)
         kind = "onion" if rating["domain"].endswith(".onion") else (
             "paper" if rating["domain"] in ("arxiv.org", "doi.org") or "pdf" in ctype else
@@ -363,6 +365,16 @@ def parse_crossref(data: dict) -> list[dict]:
 
 def _with_rating(r: dict) -> dict:
     return {**r, **credibility.rate(r.get("url", ""))}
+
+
+_BOT_WALLS = ("client challenge", "just a moment", "attention required", "verify you are human",
+              "are you a robot", "access denied", "enable javascript and cookies")
+
+
+def _is_bot_wall(doc: dict) -> bool:
+    title = doc.get("title", "").lower()
+    return any(w in title for w in _BOT_WALLS) or (
+        len(doc.get("text", "")) < 600 and any(w in doc.get("text", "").lower() for w in _BOT_WALLS))
 
 
 def _charset(ctype: str) -> str:

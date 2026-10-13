@@ -109,3 +109,31 @@ def test_choose_prefers_credible_and_diverse():
             for i, (d, t) in enumerate([("a.com", 3), ("a.com", 3), ("a.com", 3), ("gov.gov", 1), ("b.org", 2)])]
     picked = Researcher.choose(hits, 4)
     assert [h["domain"] for h in picked] == ["gov.gov", "b.org", "a.com", "a.com"]
+
+
+def test_template_echo_is_ignored_and_search_widens(tb, tmp_path):
+    """A small model that copies the template literally must not send junk queries."""
+    echo = {"queries": [{"q": "search engine query", "where": "web|papers|wiki"},
+                        {"q": "official statistics", "where": "web"}]}
+    llm = RoutingLLM(plan=lambda p: echo)
+    logs = []
+    Researcher(tb, llm, Config(home=tmp_path), log=logs.append).investigate("Is X rising?", "quick")
+    searched = [m for m in logs if m.startswith("searching")]
+    assert searched and all("Is X rising?" in m for m in searched)
+
+
+def test_no_evidence_means_no_answer_from_memory(tb, tmp_path):
+    tb.web.search = lambda q, n=8: []
+    tb.web.papers = lambda q, n=6: []
+    llm = RoutingLLM(synth=lambda p: {"answer": "made up", "key_findings": [{"claim": "made up"}]})
+    r = Researcher(tb, llm, Config(home=tmp_path)).investigate("Anything?", "quick")
+    assert not any("Write the synthesis" in p for p in llm.prompts)
+    assert r["data"]["answer"] == "" and r["data"]["findings"] == []
+    assert "SCHOLAR_SEARXNG_URL" in r["markdown"]
+
+
+def test_unsupported_numbers_are_flagged():
+    from scholar.research import unsupported_numbers
+    ev = "The Pi 5 drew 7.2 watts under load and 2,700 mW idle in 2024."
+    assert unsupported_numbers("It uses 7.2 W [S3], about 1.5 W idle, 2700 mW, since 2024.", ev) == ["1.5"]
+    assert unsupported_numbers("Uses 7.2 W [S12].", ev) == []

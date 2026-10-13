@@ -105,3 +105,10 @@ def test_socks5_handshake_reaches_onion():
     assert seen["host"] == "exampleexampleexample.onion"
     assert doc["kind"] == "onion" and doc["tier"] == 4 and doc["title"] == "Hidden"
     srv.close()
+
+
+def test_bot_check_pages_are_not_content():
+    from scholar.web import _is_bot_wall
+    assert _is_bot_wall({"title": "Client Challenge", "text": "x"})
+    assert _is_bot_wall({"title": "", "text": "Just a moment... Enable JavaScript and cookies to continue"})
+    assert not _is_bot_wall({"title": "Pi 5 review", "text": "A long article. " * 100})
