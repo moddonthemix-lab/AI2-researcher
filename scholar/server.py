@@ -118,7 +118,8 @@ def brief(store: Store, jobs: Jobs | None) -> dict:
 
 
 def make_handler(store: Store, assistant: Assistant | None, researcher: Researcher | None,
-                 token: str = "", memory: ResearchMemory | None = None, jobs: Jobs | None = None):
+                 token: str = "", memory: ResearchMemory | None = None, jobs: Jobs | None = None,
+                 voice=None):
     lock = threading.Lock()  # one SQLite connection / one line of thought at a time
     if jobs is None and researcher is not None:
         def shared(log):  # tests / simple setups: reuse the one researcher, under the lock
@@ -147,6 +148,47 @@ def make_handler(store: Store, assistant: Assistant | None, researcher: Research
                 return True
             self._send(401, {"error": "unauthorized"})
             return False
+
+        def _send_bytes(self, status: int, data: bytes, ctype: str) -> None:
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _raw(self, limit: int = 20 * 2**20) -> bytes:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > limit:
+                raise ValueError("upload too large")
+            return self.rfile.read(length) if length else b""
+
+        def _voice(self, path: str):
+            """Voice terminal endpoints (e.g. an ESP32-S3 with a mic and speaker)."""
+            from .voice import VoiceUnavailable, wav_info
+            if voice is None:
+                return self._send(503, {"error": "voice not configured"})
+            try:
+                if path == "/api/speak":
+                    text = self._body().get("text", "")
+                    if not text:
+                        return self._send(400, {"error": "send {\"text\": \"...\"}"})
+                    return self._send_bytes(200, voice.synthesize(text), "audio/wav")
+                audio = self._raw()  # /api/listen: the body is a WAV recording
+                try:
+                    info = wav_info(audio)
+                except Exception:  # noqa: BLE001 — anything that isn't a WAV
+                    return self._send(400, {"error": "send a WAV recording (16 kHz mono works best)"})
+                text = voice.transcribe(audio)
+                reply = ""
+                if text and assistant is not None:
+                    with lock:
+                        reply = assistant.ask(text, self.headers.get("X-From", ""))
+                from .voice import speakable
+                return self._send(200, {"heard": text, "reply": reply, "speak": speakable(reply), "audio": info})
+            except VoiceUnavailable as e:
+                return self._send(503, {"error": str(e)})
+            except LLMError as e:
+                return self._send(502, {"error": str(e)})
 
         def _body(self) -> dict:
             length = int(self.headers.get("Content-Length") or 0)
@@ -219,6 +261,11 @@ def make_handler(store: Store, assistant: Assistant | None, researcher: Research
             if not self._authorized():
                 return
             path = urlparse(self.path).path
+            if path in ("/api/speak", "/api/listen"):
+                try:
+                    return self._voice(path)
+                except ValueError as e:
+                    return self._send(400, {"error": str(e)})
             try:
                 body = self._body()
             except ValueError:
@@ -281,8 +328,8 @@ def _brief(s: dict | None) -> dict | None:
 
 
 def serve(store: Store, assistant: Assistant | None, researcher: Researcher | None, host: str, port: int,
-          token: str = "", memory: ResearchMemory | None = None, jobs: Jobs | None = None) -> None:
-    httpd = ThreadingHTTPServer((host, port), make_handler(store, assistant, researcher, token, memory, jobs))
+          token: str = "", memory: ResearchMemory | None = None, jobs: Jobs | None = None, voice=None) -> None:
+    httpd = ThreadingHTTPServer((host, port), make_handler(store, assistant, researcher, token, memory, jobs, voice))
     print(f"Scholar API on http://{host}:{port}  (Ctrl+C to stop)")
     try:
         httpd.serve_forever()

@@ -14,6 +14,7 @@ dependencies = []  # core runs on the standard library + Ollama
 docs = ["docling>=2.0"]                              # layout-aware PDF/DOCX/PPTX/XLSX parsing with real tables
 pdf = ["pypdf>=4"]                                   # lightweight PDF text fallback
 analysis = ["pandas>=2", "numpy>=1.24", "matplotlib>=3.7", "openpyxl>=3.1"]   # for the Python sandbox
+voice = ["faster-whisper>=1.0", "sounddevice>=0.4", "numpy>=1.24", "soundfile>=0.12", "piper-tts>=1.2"]
 all = ["docling>=2.0", "pypdf>=4", "pandas>=2", "numpy>=1.24", "matplotlib>=3.7", "openpyxl>=3.1"]
 dev = ["pytest>=8"]
 

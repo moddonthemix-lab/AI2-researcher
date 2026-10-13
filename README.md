@@ -169,6 +169,34 @@ Only `.onion` addresses go through Tor. Everything from there is tier 4 and has 
 before it can count toward a *verified* finding. Scholar reads and reports; he doesn't log in, buy,
 download or post anywhere. Keep what you ask him to look at legal where you live.
 
+## His voice
+
+He can talk, all locally:
+
+```bash
+pip install -e '.[voice]'          # Whisper (listening) + Piper (speaking)
+scholar voice                      # press Enter, ask out loud, hear the answer
+scholar voice --hands-free         # just talk
+scholar say --report 3             # read a report's answer aloud
+```
+
+- **Listening:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (`base.en` on a Mac,
+  `tiny.en` on a Pi; `SCHOLAR_WHISPER_MODEL`).
+- **Speaking:** [Piper](https://github.com/rhasspy/piper) if you point `SCHOLAR_PIPER_VOICE` at a voice.
+  `en_GB-alan-medium` fits a scholar:
+  ```bash
+  mkdir -p ~/.scholar/voices && cd ~/.scholar/voices
+  for f in en_GB-alan-medium.onnx en_GB-alan-medium.onnx.json; do
+    curl -LO "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/$f"; done
+  export SCHOLAR_PIPER_VOICE=~/.scholar/voices/en_GB-alan-medium.onnx
+  ```
+  Without Piper he uses the Mac's built-in voice (`SCHOLAR_SAY_VOICE`, default `Daniel`) or espeak-ng on a Pi.
+- He **speaks the short version**: citations, links, tables and markdown are stripped, and long answers
+  become a few sentences plus "the full details are on screen".
+- **Voice terminal (ESP32-S3 with an I2S mic and speaker):** record a 16 kHz mono WAV and
+  `POST /api/listen` (body = the WAV) → `{"heard", "reply", "speak"}`; then `POST /api/speak`
+  `{"text": ...}` → a WAV to play. Speech recognition and the voice run on the Mac/Pi, not the ESP32.
+
 ## Using him
 
 | Command | What it does |
@@ -269,6 +297,7 @@ SCHOLAR_API_HOST=0.0.0.0 SCHOLAR_API_TOKEN=change-me scholar serve     # port 87
 | POST | `/api/research` or `/api/plan` with `"async": true` | queue it as a background job → `{"job_id", "poll"}` |
 | GET | `/api/jobs` · `/api/jobs/<id>` | job status: queued (with position) / running (current step) / done (report id) / failed |
 | GET | `/api/brief` | under-1KB status for small screens (ESP32) |
+| POST | `/api/listen` (body: WAV) · `/api/speak` `{"text"}` | voice terminal: speech in → answer; text → WAV |
 
 Send `Authorization: Bearer <SCHOLAR_API_TOKEN>` when a token is set. Always set one before
 binding to `0.0.0.0`.

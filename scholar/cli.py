@@ -43,6 +43,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd")
 
     sub.add_parser("chat", help="Talk to Scholar in the terminal")
+    v = sub.add_parser("voice", help="Talk to Scholar out loud (press Enter, then speak)")
+    v.add_argument("--hands-free", action="store_true", help="listen continuously, no Enter needed")
+    v = sub.add_parser("say", help="Hear Scholar read something (e.g. a report's answer)")
+    v.add_argument("text", nargs="*")
+    v.add_argument("--report", type=int, help="read the answer of this report aloud")
     for name, helptext in (("research", "Investigate a question and write a cited report"),
                            ("plan", "Turn a business idea into a researched plan with numbers")):
         r = sub.add_parser(name, help=helptext)
@@ -171,6 +176,36 @@ def chat_loop(assistant: Assistant) -> None:
             print(f"error: {e}", file=sys.stderr)
 
 
+def voice_loop(assistant: Assistant, config: Config, hands_free: bool) -> None:
+    from .voice import Voice, VoiceUnavailable
+
+    voice = Voice(config.whisper_model, config.piper_voice, config.say_voice)
+    name = config.assistant_name
+    print(f"{name} voice mode ({voice.engine} voice). {'Just talk.' if hands_free else 'Press Enter, then speak.'} "
+          "Ctrl+C to quit.")
+    try:
+        while True:
+            if not hands_free:
+                input("\n[Enter to talk] ")
+            print("listening…")
+            text = voice.listen()
+            if not text:
+                continue
+            print(f"you> {text}")
+            try:
+                reply = assistant.ask(text)
+            except LLMError as e:
+                print(f"error: {e}", file=sys.stderr)
+                continue
+            print(f"{name.lower()}> {reply}")
+            voice.say(reply)
+    except VoiceUnavailable as e:
+        print(e, file=sys.stderr)
+        sys.exit(1)
+    except (EOFError, KeyboardInterrupt):
+        print()
+
+
 def _progress(msg: str) -> None:
     print(f"  · {msg}", file=sys.stderr, flush=True)
 
@@ -191,6 +226,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if cmd in (None, "chat"):
             chat_loop(Assistant(tb, llm, config))
+        elif cmd == "voice":
+            voice_loop(Assistant(tb, llm, config), config, args.hands_free)
+        elif cmd == "say":
+            from .voice import Voice
+            text = " ".join(args.text)
+            if args.report:
+                r = db.get_report(args.report)
+                text = (r["data"].get("answer") if r else "") or "I couldn't find that report."
+            Voice(config.whisper_model, config.piper_voice, config.say_voice).say(text or "Hello. I'm Scholar.")
         elif cmd in ("research", "plan"):
             result = Researcher(tb, llm, config, log=_progress, fast_llm=fast).investigate(
                 " ".join(args.text), args.depth, cmd)
@@ -336,9 +380,10 @@ def main(argv: list[str] | None = None) -> int:
                 jmem = ResearchMemory(jdb, build_index(config, jdb), config)
                 return Researcher(Toolbox(jdb, web, jmem, config), llm, config, log=log, fast_llm=fast)
 
+            from .voice import Voice
             serve(db, Assistant(tb, llm, config), Researcher(tb, llm, config, log=_progress, fast_llm=fast),
                   args.host or config.api_host, args.port or config.api_port, config.api_token, memory,
-                  Jobs(job_researcher))
+                  Jobs(job_researcher), Voice(config.whisper_model, config.piper_voice, config.say_voice))
         elif cmd == "doctor":
             return doctor(config, llm, web, memory, fast)
         elif cmd == "bench":

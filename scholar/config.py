@@ -21,9 +21,9 @@ def _env(name: str, default: str = "") -> str:
 #   pi   — Raspberry Pi 5 (8-16GB): small models, short reads; or point SCHOLAR_OLLAMA_URL at a bigger machine
 #   gpu  — Apple Silicon with 32GB+ or a desktop GPU: bigger models, longer reads
 PROFILES = {
-    "cpu": {"model": "qwen3:8b", "fast_model": "qwen3:4b", "num_ctx": 8192, "read_chars": 6000},
-    "pi":  {"model": "qwen3:4b", "fast_model": "qwen3:1.7b", "num_ctx": 4096, "read_chars": 3500},
-    "gpu": {"model": "qwen3:14b", "fast_model": "qwen3:8b", "num_ctx": 16384, "read_chars": 10000},
+    "cpu": {"model": "qwen3:8b", "fast_model": "qwen3:4b", "num_ctx": 8192, "read_chars": 6000, "whisper": "base.en"},
+    "pi":  {"model": "qwen3:4b", "fast_model": "qwen3:1.7b", "num_ctx": 4096, "read_chars": 3500, "whisper": "tiny.en"},
+    "gpu": {"model": "qwen3:14b", "fast_model": "qwen3:8b", "num_ctx": 16384, "read_chars": 10000, "whisper": "small.en"},
 }
 
 
@@ -72,6 +72,10 @@ class Config:
     qdrant_api_key: str = field(default_factory=lambda: _env("SCHOLAR_QDRANT_API_KEY"))
     # Python sandbox for quantitative analysis
     sandbox_timeout: int = field(default_factory=lambda: int(_env("SCHOLAR_SANDBOX_TIMEOUT", "60")))
+    # Voice (optional extras): Whisper to listen; Piper, macOS `say` or espeak-ng to speak
+    whisper_model: str = field(default_factory=_p("whisper", "SCHOLAR_WHISPER_MODEL"))
+    piper_voice: str = field(default_factory=lambda: _env("SCHOLAR_PIPER_VOICE"))
+    say_voice: str = field(default_factory=lambda: _env("SCHOLAR_SAY_VOICE", "Daniel"))
     # HTTP API (how the rest of the family will reach Scholar)
     api_host: str = field(default_factory=lambda: _env("SCHOLAR_API_HOST", "127.0.0.1"))
     api_port: int = field(default_factory=lambda: int(_env("SCHOLAR_API_PORT", "8766")))
