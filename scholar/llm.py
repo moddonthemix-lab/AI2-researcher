@@ -16,10 +16,13 @@ class LLMError(RuntimeError):
 
 
 class Ollama:
-    def __init__(self, url: str, model: str, timeout: float = 600):
+    def __init__(self, url: str, model: str, timeout: float = 900, num_ctx: int = 16384):
         self.url = url.rstrip("/")
         self.model = model
         self.timeout = timeout
+        # Ollama's default context is only 2-4k tokens and it silently drops the start of longer
+        # prompts — Scholar's reading prompts are bigger than that, so ask for a real window.
+        self.num_ctx = num_ctx
 
     def _post(self, path: str, payload: dict) -> dict:
         req = urllib.request.Request(
@@ -36,12 +39,17 @@ class Ollama:
             raise LLMError(
                 f"Can't reach Ollama at {self.url} ({e.reason}). Is it running? Try `ollama serve`."
             ) from e
+        except (TimeoutError, OSError) as e:
+            raise LLMError(f"Ollama took longer than {self.timeout:.0f}s to answer ({e}). A smaller --depth "
+                           "or a faster model helps; raise SCHOLAR_LLM_TIMEOUT if your machine is slow.") from e
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
              json_mode: bool = False) -> dict:
         """Return the assistant message dict (``content`` and maybe ``tool_calls``)."""
-        payload = {"model": self.model, "messages": messages, "stream": False,
-                   "options": {"temperature": 0.2}}  # a researcher should be steady, not creative
+        options = {"temperature": 0.2, "num_ctx": self.num_ctx}  # a researcher should be steady, not creative
+        if json_mode:
+            options["num_predict"] = 3000  # a stuck model can't ramble forever
+        payload = {"model": self.model, "messages": messages, "stream": False, "options": options}
         if tools:
             payload["tools"] = tools
         if json_mode:

@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     web = Web(config.searxng_url, config.tor_proxy, openalex_key=config.openalex_key, contact=config.contact)
     memory = ResearchMemory(db, build_index(config, db), config)
     tb = Toolbox(db, web, memory, config)
-    llm = Ollama(config.ollama_url, config.model)
+    llm = Ollama(config.ollama_url, config.model, config.llm_timeout, config.num_ctx)
     cmd, action = args.cmd, getattr(args, "action", None)
 
     try:

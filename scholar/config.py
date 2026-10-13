@@ -25,6 +25,8 @@ class Config:
     home: Path = field(default_factory=_default_home)
     ollama_url: str = field(default_factory=lambda: _env("SCHOLAR_OLLAMA_URL", "http://localhost:11434"))
     model: str = field(default_factory=lambda: _env("SCHOLAR_MODEL", "qwen2.5:7b"))
+    num_ctx: int = field(default_factory=lambda: int(_env("SCHOLAR_NUM_CTX", "16384")))
+    llm_timeout: int = field(default_factory=lambda: int(_env("SCHOLAR_LLM_TIMEOUT", "900")))
     assistant_name: str = field(default_factory=lambda: _env("SCHOLAR_NAME", "Scholar"))
     user_name: str = field(default_factory=lambda: _env("SCHOLAR_USER", "boss"))
     # Search: a self-hosted SearXNG is the most private and reliable; DuckDuckGo is the fallback.
