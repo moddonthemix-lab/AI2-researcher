@@ -75,17 +75,19 @@ class RoutingLLM:
 
     ROUTES = (("Break this question into a research plan", "plan"), ("Read the source like a careful analyst", "extract"),
               ("reviewing an investigation in progress", "gaps"), ("Write the synthesis", "synth"),
-              ("DISPROVE these preliminary findings", "skeptic_queries"), ("contradict, weaken or support", "skeptic_read"))
+              ("DISPROVE these preliminary findings", "skeptic_queries"), ("contradict, weaken or support", "skeptic_read"),
+              ("Scholar's fact-checker", "support"))
 
     def __init__(self, chat=None, **handlers):
         self.handlers = handlers
         self.chat_script = list(chat or [])
         self.prompts = []
 
-    def chat(self, messages, tools=None, json_mode=False):
+    def chat(self, messages, tools=None, json_mode=False, schema=None, think=None):
         prompt = messages[-1]["content"]
         self.prompts.append(prompt)
-        if not json_mode:
+        self.schemas = getattr(self, "schemas", []) + [schema]
+        if not (json_mode or schema):
             return self.chat_script.pop(0)
         for marker, name in self.ROUTES:
             if marker in prompt:
@@ -112,3 +114,12 @@ def config(tmp_path):
 @pytest.fixture
 def tb(db, config):
     return Toolbox(db, FakeWeb(), ResearchMemory(db, None, config), config)
+
+
+@pytest.fixture(autouse=True)
+def _offline(monkeypatch):
+    """Tests never talk to a real Ollama, Qdrant or SearXNG, whatever is running on the machine."""
+    monkeypatch.setenv("SCHOLAR_OLLAMA_URL", "http://127.0.0.1:9")
+    for var in ("SCHOLAR_QDRANT_URL", "SCHOLAR_SEARXNG_URL", "SCHOLAR_PROFILE", "SCHOLAR_MODEL", "SCHOLAR_FAST_MODEL",
+                "SCHOLAR_NUM_CTX", "SCHOLAR_READ_CHARS", "SCHOLAR_THINK"):
+        monkeypatch.delenv(var, raising=False)

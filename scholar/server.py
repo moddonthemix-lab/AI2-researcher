@@ -3,21 +3,28 @@
 This is how the rest of the AI family — and later the Family Hub forum —
 talks to Scholar: structured requests in, structured results out.
 Set SCHOLAR_API_TOKEN to require ``Authorization: Bearer <token>``.
+
+Small devices (an ESP32-S3 screen, a Raspberry Pi terminal) can't hold a
+connection open through a 20-minute investigation, so research can run as a
+background job (``"async": true``) that they poll, and ``GET /api/brief`` returns
+a tiny status summary sized for a microcontroller.
 """
 
 from __future__ import annotations
 
+import itertools
 import json
+import queue
 import re
 import threading
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from .agent import CARD
 from .assistant import Assistant
-from .db import Store
+from .db import LESSON_KINDS, Store
 from .llm import LLMError
-from .db import LESSON_KINDS
 from .memory import ResearchMemory
 from .research import DEPTHS, Researcher
 
@@ -26,9 +33,98 @@ from .research import DEPTHS, Researcher
 BOSS = ("", "boss", "user")
 
 
+class Jobs:
+    """Background investigations, run one at a time in order (a CPU-only machine can't do two at once).
+
+    ``factory(log)`` returns the Researcher to use; the CLI gives each job its own database connection.
+    """
+
+    def __init__(self, factory):
+        self.factory = factory
+        self.jobs: dict[int, dict] = {}
+        self._ids = itertools.count(1)
+        self._queue: queue.Queue = queue.Queue()
+        self._lock = threading.Lock()
+        threading.Thread(target=self._worker, daemon=True).start()
+
+    def submit(self, question: str, depth: str, mode: str, sender: str = "") -> dict:
+        with self._lock:
+            jid = next(self._ids)
+            self.jobs[jid] = {"id": jid, "status": "queued", "question": question, "depth": depth, "mode": mode,
+                              "from": sender, "step": "", "steps": 0, "report_id": None, "investigation_id": None,
+                              "error": None, "created": _now(), "started": None, "finished": None}
+        self._queue.put(jid)
+        return self.get(jid)
+
+    def get(self, jid: int) -> dict | None:
+        with self._lock:
+            job = self.jobs.get(jid)
+            if job is None:
+                return None
+            ahead = sum(1 for j in self.jobs.values() if j["status"] == "queued" and j["id"] < jid)
+            return {**job, "queue_position": ahead if job["status"] == "queued" else None}
+
+    def all(self) -> list[dict]:
+        return [self.get(j) for j in sorted(self.jobs, reverse=True)[:50]]
+
+    def running(self) -> dict | None:
+        return next((self.get(j["id"]) for j in self.jobs.values() if j["status"] == "running"), None)
+
+    def queued(self) -> int:
+        return sum(1 for j in self.jobs.values() if j["status"] == "queued")
+
+    def _worker(self) -> None:
+        while True:
+            jid = self._queue.get()
+            job = self.jobs[jid]
+
+            def log(msg: str, job=job) -> None:
+                job["step"], job["steps"] = msg.strip()[:200], job["steps"] + 1
+
+            job.update(status="running", started=_now())
+            try:
+                r = self.factory(log).investigate(job["question"], job["depth"], job["mode"])
+                job.update(status="done", report_id=r["report_id"], investigation_id=r["investigation_id"],
+                           answer=r["data"].get("answer", "")[:2000], step="done")
+            except Exception as e:  # noqa: BLE001 — report it to whoever is polling
+                job.update(status="failed", error=f"{type(e).__name__}: {e}"[:500])
+            job["finished"] = _now()
+
+
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def _cut(text: str, n: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= n else text[:n - 1] + "…"
+
+
+def brief(store: Store, jobs: Jobs | None) -> dict:
+    """A status summary small enough for a microcontroller screen (well under 1 KB)."""
+    run = jobs.running() if jobs else None
+    stats = store.stats()
+    last = store.reports(1)
+    rep = store.get_report(last[0]["id"]) if last else None
+    return {
+        "agent": "scholar", "busy": bool(run), "queue": jobs.queued() if jobs else 0,
+        "job": {"id": run["id"], "q": _cut(run["question"], 60), "step": _cut(run["step"], 60),
+                "steps": run["steps"]} if run else None,
+        "last": {"id": rep["id"], "q": _cut(rep["question"], 60),
+                 "answer": _cut(rep["data"].get("answer", ""), 140)} if rep else None,
+        "findings": stats["findings"], "verified": stats["findings_by_status"]["verified"],
+        "open_q": stats["open_questions"],
+    }
+
+
 def make_handler(store: Store, assistant: Assistant | None, researcher: Researcher | None,
-                 token: str = "", memory: ResearchMemory | None = None):
+                 token: str = "", memory: ResearchMemory | None = None, jobs: Jobs | None = None):
     lock = threading.Lock()  # one SQLite connection / one line of thought at a time
+    if jobs is None and researcher is not None:
+        def shared(log):  # tests / simple setups: reuse the one researcher, under the lock
+            researcher.log = log
+            return _Locked(researcher, lock)
+        jobs = Jobs(shared)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "Scholar/0.1"
@@ -69,6 +165,13 @@ def make_handler(store: Store, assistant: Assistant | None, researcher: Research
             with lock:
                 if url.path == "/api/health":
                     return self._send(200, {"ok": True, "agent": CARD["id"]})
+                if url.path == "/api/brief":
+                    return self._send(200, brief(store, jobs))
+                if url.path == "/api/jobs":
+                    return self._send(200, jobs.all() if jobs else [])
+                if m := re.fullmatch(r"/api/jobs/(\d+)", url.path):
+                    job = jobs.get(int(m.group(1))) if jobs else None
+                    return self._send(200 if job else 404, job or {"error": "not found"})
                 if url.path == "/api/agent":
                     return self._send(200, {**CARD, "library": store.stats()})
                 if url.path == "/api/findings":
@@ -143,6 +246,13 @@ def make_handler(store: Store, assistant: Assistant | None, researcher: Research
                         if depth not in DEPTHS:
                             return self._send(400, {"error": f"depth must be one of {', '.join(DEPTHS)}"})
                         mode = "plan" if path == "/api/plan" else "research"
+                        if body.get("async"):
+                            job = jobs.submit(body.get("question") or body["idea"], depth, mode, sender)
+                            return self._send(202, {"from": "scholar", "job_id": job["id"],
+                                                    "status": job["status"], "poll": f"/api/jobs/{job['id']}"})
+                        if jobs and jobs.running():
+                            return self._send(409, {"error": "busy with another investigation — send "
+                                                             "\"async\": true to queue this one"})
                         r = researcher.investigate(body.get("question") or body["idea"], depth, mode)
                         return self._send(200, {"from": "scholar", "report_id": r["report_id"],
                                                 "markdown": r["markdown"], "data": r["data"]})
@@ -153,6 +263,17 @@ def make_handler(store: Store, assistant: Assistant | None, researcher: Research
     return Handler
 
 
+class _Locked:
+    """Run a shared researcher's investigation while holding the API lock (single-connection setups)."""
+
+    def __init__(self, researcher: Researcher, lock: threading.Lock):
+        self.researcher, self.lock = researcher, lock
+
+    def investigate(self, *a, **kw):
+        with self.lock:
+            return self.researcher.investigate(*a, **kw)
+
+
 def _brief(s: dict | None) -> dict | None:
     if s is None:
         return None
@@ -160,8 +281,8 @@ def _brief(s: dict | None) -> dict | None:
 
 
 def serve(store: Store, assistant: Assistant | None, researcher: Researcher | None, host: str, port: int,
-          token: str = "", memory: ResearchMemory | None = None) -> None:
-    httpd = ThreadingHTTPServer((host, port), make_handler(store, assistant, researcher, token, memory))
+          token: str = "", memory: ResearchMemory | None = None, jobs: Jobs | None = None) -> None:
+    httpd = ThreadingHTTPServer((host, port), make_handler(store, assistant, researcher, token, memory, jobs))
     print(f"Scholar API on http://{host}:{port}  (Ctrl+C to stop)")
     try:
         httpd.serve_forever()

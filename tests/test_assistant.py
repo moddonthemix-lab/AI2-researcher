@@ -12,7 +12,7 @@ class FakeLLM:
         self.script = list(script)
         self.calls = []
 
-    def chat(self, messages, tools=None, json_mode=False):
+    def chat(self, messages, tools=None, json_mode=False, schema=None, think=None):
         self.calls.append(json.loads(json.dumps(messages)))
         return self.script.pop(0)
 

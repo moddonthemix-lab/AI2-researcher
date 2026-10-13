@@ -76,7 +76,8 @@ class Embedder:
 # ---------------------------------------------------------------------- stores
 class VectorStore(Protocol):
     def upsert(self, points: list[dict]) -> None: ...
-    def search(self, vector: list[float], limit: int, kinds: list[str] | None) -> list[dict]: ...
+    def search(self, vector: list[float], limit: int, kinds: list[str] | None,
+               match: dict | None = None) -> list[dict]: ...
     def delete(self, ids: list[str]) -> None: ...
     def count(self) -> int: ...
 
@@ -114,11 +115,14 @@ class QdrantStore:
         for i in range(0, len(points), 128):
             _http("PUT", self._c("/points?wait=true"), {"points": points[i:i + 128]}, self.headers)
 
-    def search(self, vector: list[float], limit: int = 10, kinds: list[str] | None = None) -> list[dict]:
+    def search(self, vector: list[float], limit: int = 10, kinds: list[str] | None = None,
+               match: dict | None = None) -> list[dict]:
         self._ensure(len(vector))
         body: dict = {"query": vector, "limit": limit, "with_payload": True}
-        if kinds:
-            body["filter"] = {"must": [{"key": "kind", "match": {"any": kinds}}]}
+        must = [{"key": "kind", "match": {"any": kinds}}] if kinds else []
+        must += [{"key": k, "match": {"value": v}} for k, v in (match or {}).items()]
+        if must:
+            body["filter"] = {"must": must}
         res = _http("POST", self._c("/points/query"), body, self.headers).get("result") or {}
         return [{"id": p["id"], "score": p["score"], **(p.get("payload") or {})} for p in res.get("points", [])]
 
@@ -151,7 +155,8 @@ class LocalVectorStore:
         with self.conn:
             self.conn.executemany("INSERT OR REPLACE INTO vectors(id, kind, payload, vec, norm) VALUES (?,?,?,?,?)", rows)
 
-    def search(self, vector: list[float], limit: int = 10, kinds: list[str] | None = None) -> list[dict]:
+    def search(self, vector: list[float], limit: int = 10, kinds: list[str] | None = None,
+               match: dict | None = None) -> list[dict]:
         qn = math.sqrt(sum(x * x for x in vector)) or 1.0
         sql, params = "SELECT id, payload, vec, norm FROM vectors", []
         if kinds:
@@ -159,6 +164,10 @@ class LocalVectorStore:
             params = list(kinds)
         scored = []
         for pid, payload, blob, norm in self.conn.execute(sql, params):
+            if match:
+                p = json.loads(payload)
+                if any(p.get(k) != v for k, v in match.items()):
+                    continue
             v = array("f")
             v.frombytes(blob)
             if len(v) != len(vector):
@@ -204,12 +213,12 @@ class SemanticIndex:
             return 0
 
     def search(self, query: str, limit: int = 10, kinds: list[str] | None = None,
-               min_score: float = 0.0) -> list[dict]:
+               min_score: float = 0.0, match: dict | None = None) -> list[dict]:
         if not self.available or not query.strip():
             return []
         try:
             vec = self.embedder.embed([query], query=True)[0]
-            return [h for h in self.store.search(vec, limit, kinds) if h["score"] >= min_score]
+            return [h for h in self.store.search(vec, limit, kinds, match) if h["score"] >= min_score]
         except (LLMError, VectorError) as e:
             self.error = str(e)
             return []

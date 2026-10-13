@@ -16,6 +16,29 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+# Hardware profiles. Anything set explicitly in the environment wins over the profile.
+#   cpu  — Intel Macs and other machines without a usable GPU (the default)
+#   pi   — Raspberry Pi 5 (8-16GB): small models, short reads; or point SCHOLAR_OLLAMA_URL at a bigger machine
+#   gpu  — Apple Silicon with 32GB+ or a desktop GPU: bigger models, longer reads
+PROFILES = {
+    "cpu": {"model": "qwen3:8b", "fast_model": "qwen3:4b", "num_ctx": 8192, "read_chars": 6000},
+    "pi":  {"model": "qwen3:4b", "fast_model": "qwen3:1.7b", "num_ctx": 4096, "read_chars": 3500},
+    "gpu": {"model": "qwen3:14b", "fast_model": "qwen3:8b", "num_ctx": 16384, "read_chars": 10000},
+}
+
+
+def _profile() -> dict:
+    return PROFILES.get(_env("SCHOLAR_PROFILE", "cpu").lower(), PROFILES["cpu"])
+
+
+def _p(key: str, env: str):
+    return lambda: _env(env) or _profile()[key]
+
+
+def _p_int(key: str, env: str):
+    return lambda: int(_env(env) or _profile()[key])
+
+
 def _default_home() -> Path:
     return Path(_env("SCHOLAR_HOME", str(Path.home() / ".scholar"))).expanduser()
 
@@ -24,8 +47,14 @@ def _default_home() -> Path:
 class Config:
     home: Path = field(default_factory=_default_home)
     ollama_url: str = field(default_factory=lambda: _env("SCHOLAR_OLLAMA_URL", "http://localhost:11434"))
-    model: str = field(default_factory=lambda: _env("SCHOLAR_MODEL", "qwen2.5:7b"))
-    num_ctx: int = field(default_factory=lambda: int(_env("SCHOLAR_NUM_CTX", "16384")))
+    profile: str = field(default_factory=lambda: _env("SCHOLAR_PROFILE", "cpu").lower())
+    # The thinker (planning, synthesis, the skeptic) and the reader (pulling facts out of every source).
+    model: str = field(default_factory=_p("model", "SCHOLAR_MODEL"))
+    fast_model: str = field(default_factory=_p("fast_model", "SCHOLAR_FAST_MODEL"))
+    num_ctx: int = field(default_factory=_p_int("num_ctx", "SCHOLAR_NUM_CTX"))
+    read_chars: int = field(default_factory=_p_int("read_chars", "SCHOLAR_READ_CHARS"))
+    # Let the thinker reason step by step before answering (slower on CPU, often more accurate).
+    think: bool = field(default_factory=lambda: _env("SCHOLAR_THINK", "0").lower() in ("1", "true", "yes"))
     llm_timeout: int = field(default_factory=lambda: int(_env("SCHOLAR_LLM_TIMEOUT", "900")))
     assistant_name: str = field(default_factory=lambda: _env("SCHOLAR_NAME", "Scholar"))
     user_name: str = field(default_factory=lambda: _env("SCHOLAR_USER", "boss"))

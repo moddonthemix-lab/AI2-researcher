@@ -62,5 +62,12 @@ CARD = {
         "POST /api/plan": {"idea": "...", "from": "agent id"},
         "POST /api/feedback": {"text": "lesson", "kind": "preference|correction|strategy|source_note",
                                "note": "boss only"},
+        "async": 'add "async": true to /api/research or /api/plan, then poll GET /api/jobs/<id>',
+        "GET /api/brief": "status under 1 KB for small screens (ESP32)",
+    },
+    "runs_on": {
+        "mac_or_pc": "full Scholar; profile cpu (no GPU) or gpu",
+        "raspberry_pi_5": "full Scholar with small models (profile pi), or borrow a stronger machine's Ollama",
+        "esp32_s3": "terminal only (screen/buttons) — talks to Scholar over Wi-Fi via /api/brief and /api/jobs",
     },
 }

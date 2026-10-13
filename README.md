@@ -111,12 +111,14 @@ optimistic number.
 
 ## Setup (MacBook)
 
-1. **Ollama + models**
+1. **Ollama + models** (for the default `cpu` profile: Intel Macs and other machines without a GPU)
    ```bash
-   ollama pull qwen2.5:7b          # 16GB Mac. With 32GB+, qwen2.5:14b reasons noticeably better.
+   ollama pull qwen3:8b            # the thinker: planning, synthesis, the skeptic
+   ollama pull qwen3:4b            # the reader: pulls facts out of every source
    ollama pull nomic-embed-text    # semantic memory
    ```
-   Small models (1–3B) are not enough: they skip tools and get the math wrong.
+   Then run `scholar bench` to see how accurate and fast they are on *your* machine (see
+   [Hardware](#hardware-your-mac-a-raspberry-pi-an-esp32)).
 2. **Scholar** (Python 3.10+)
    ```bash
    python3 -m venv .venv && source .venv/bin/activate
@@ -189,10 +191,62 @@ download or post anywhere. Keep what you ask him to look at legal where you live
 | `scholar glossary [term]` · `scholar sources` · `scholar reports` · `scholar report ID` | the library |
 | `scholar reindex` · `scholar card` · `scholar doctor` | maintenance |
 
-How long it takes depends on your Mac and model. Each source he reads is one model call, plus a few
-for planning, gaps, synthesis and the skeptic. Rough guide with `qwen2.5:7b` on Apple Silicon:
-**quick** ≈ 15 calls (a few minutes), **standard** ≈ 35 (10–20 min), **deep** ≈ 90 (30–60+ min).
-Docling's first run downloads its layout models.
+Each source he reads is one call to the reader, plus a handful of calls to the thinker for planning,
+gaps, synthesis, the fact-check and the skeptic: **quick** ≈ 15 calls, **standard** ≈ 35, **deep** ≈ 90.
+At the end of every run he prints how much model time it took. Docling's first run downloads its
+layout models.
+
+## Hardware: your Mac, a Raspberry Pi, an ESP32
+
+Accuracy comes from the model, but on a machine without a GPU, **speed is set by how much text the
+model has to read and write**, and writing is the slowest part. Scholar is built for that:
+
+- **Two brains.** A small, fast *reader* pulls facts out of every source (most of the calls); a bigger
+  *thinker* does planning, synthesis, the fact-check and the skeptic (few calls, where judgement matters).
+- **Exact answer layouts.** Every step has a JSON schema that Ollama enforces while the model writes,
+  so small models can't return broken or wrongly-shaped answers, and list sizes are capped so they
+  don't write more than needed.
+- **Sized prompts.** Each source is trimmed to its opening plus the passages closest *in meaning* to the
+  open questions, within a budget set by the profile; only the sub-questions that source might answer are
+  shown; synthesis gets the best evidence first (confirmed quotes, credible sources) up to the budget.
+- **A fact-check step.** The thinker confirms each quote really says what the claim says (a real quote
+  can still be beside the point); unsupported claims are downgraded.
+- **Thinking off by default.** Reasoning models like Qwen3 "think out loud" first, which on a CPU can mean
+  minutes per call. `SCHOLAR_THINK=1` turns it on for the thinker if you'd rather wait for better answers.
+
+| Profile | For | Thinker / reader | Context · read per source |
+|---|---|---|---|
+| `cpu` (default) | Intel Macs, PCs without a GPU | `qwen3:8b` / `qwen3:4b` | 8k tokens · 6,000 chars |
+| `pi` | Raspberry Pi 5 (8–16GB) | `qwen3:4b` / `qwen3:1.7b` | 4k tokens · 3,500 chars |
+| `gpu` | Apple Silicon 32GB+, desktop GPUs | `qwen3:14b` / `qwen3:8b` | 16k tokens · 10,000 chars |
+
+Set `SCHOLAR_PROFILE`, or override any piece (`SCHOLAR_MODEL`, `SCHOLAR_FAST_MODEL`, `SCHOLAR_NUM_CTX`,
+`SCHOLAR_READ_CHARS`). Then **measure instead of guessing**:
+
+```bash
+scholar bench                                   # your thinker and reader
+scholar bench --models qwen3:4b,qwen3:8b,gpt-oss:20b
+```
+
+`bench` runs each model through Scholar's real prompts on three small documents with known answers
+(made-up companies and numbers, so a model can't answer from memory, and one hides a prompt-injection
+trap). It scores fact recall, real quotes, invented numbers, falling for the trap, judging whether a quote
+supports a claim, and clean synthesis, plus reading and writing speed, then suggests a thinker and reader.
+
+BENCH_RESULTS_PLACEHOLDER
+
+**Raspberry Pi 5.** Same code. Either run small models on the Pi itself (`SCHOLAR_PROFILE=pi`: expect
+slow, quick-depth research), or, better, let the Pi borrow a stronger machine's brain:
+`SCHOLAR_OLLAMA_URL=http://<your-mac>.local:11434` (on the Mac: `OLLAMA_HOST=0.0.0.0 ollama serve`).
+Docling is heavy for a Pi; without it Scholar falls back to lighter parsers.
+
+**ESP32-S3.** A microcontroller can't run a language model (it has megabytes of memory; even a tiny useful
+model needs a gigabyte or more), so it becomes a *terminal* for the family: a screen, buttons, maybe a mic,
+talking to Scholar over Wi-Fi. For that he has:
+- `POST /api/research` with `"async": true` → returns a job id right away; the investigation runs in the
+  background (one at a time, queued), and the device polls `GET /api/jobs/<id>`.
+- `GET /api/brief` → a status summary under 1 KB: busy or not, the current step, the last answer
+  (shortened), and counts of findings and open questions. Sized for a small screen and a small buffer.
 
 ## JSON API (for the rest of the family)
 
@@ -212,6 +266,9 @@ SCHOLAR_API_HOST=0.0.0.0 SCHOLAR_API_TOKEN=change-me scholar serve     # port 87
 | POST | `/api/research` `{"question": "...", "depth": "standard", "from": "baby"}` | full investigation |
 | POST | `/api/plan` `{"idea": "...", "from": "amo"}` | researched business plan |
 | POST | `/api/feedback` `{"text": "...", "kind": "preference"}` | a lesson. **Boss only:** refused when `from` is another agent |
+| POST | `/api/research` or `/api/plan` with `"async": true` | queue it as a background job → `{"job_id", "poll"}` |
+| GET | `/api/jobs` · `/api/jobs/<id>` | job status: queued (with position) / running (current step) / done (report id) / failed |
+| GET | `/api/brief` | under-1KB status for small screens (ESP32) |
 
 Send `Authorization: Bearer <SCHOLAR_API_TOKEN>` when a token is set. Always set one before
 binding to `0.0.0.0`.

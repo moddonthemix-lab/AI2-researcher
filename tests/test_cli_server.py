@@ -101,3 +101,28 @@ def test_cli_graph_feedback_stress(tmp_path, monkeypatch, capsys):
     assert main(["analyze", "--code", "print(6*7)"]) == 0
     out = capsys.readouterr().out
     assert "lesson #1" in out and "Always show a table" in out and "prob_monthly_loss" in out and "42" in out
+
+
+def test_async_jobs_and_brief_for_small_devices(tmp_path):
+    import time
+    from .test_research import full_llm
+    store = Store()
+    researcher = Researcher(Toolbox(store, FakeWeb()), full_llm(), Config(home=tmp_path))
+    httpd, base = _serve(store, researcher)
+    try:
+        status, body = _req(base + "/api/research", "POST", {"question": "Are sneaker resale prices rising?",
+                                                              "depth": "quick", "async": True, "from": "esp32"})
+        assert status == 202 and body["poll"] == f"/api/jobs/{body['job_id']}"
+        for _ in range(100):
+            job = _req(base + body["poll"])[1]
+            if job["status"] in ("done", "failed"):
+                break
+            time.sleep(0.05)
+        assert job["status"] == "done" and job["report_id"] and job["steps"] > 3, job
+        b = _req(base + "/api/brief")[1]
+        assert b["busy"] is False and b["last"]["id"] == job["report_id"] and b["findings"] >= 1
+        assert len(json.dumps(b)) < 1024                      # fits a microcontroller's buffer
+        assert _req(base + "/api/jobs")[1][0]["id"] == body["job_id"]
+        assert _req(base + "/api/jobs/999")[0] == 404
+    finally:
+        httpd.shutdown()

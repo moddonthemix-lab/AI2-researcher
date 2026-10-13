@@ -143,6 +143,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host")
     s.add_argument("--port", type=int)
     sub.add_parser("doctor", help="Check Ollama, the model and internet access")
+    b = sub.add_parser("bench", help="Measure accuracy and speed of models on this machine")
+    b.add_argument("--models", help="comma-separated, e.g. qwen3:4b,qwen3:8b,gpt-oss:20b (default: your two)")
     return p
 
 
@@ -181,15 +183,20 @@ def main(argv: list[str] | None = None) -> int:
     web = Web(config.searxng_url, config.tor_proxy, openalex_key=config.openalex_key, contact=config.contact)
     memory = ResearchMemory(db, build_index(config, db), config)
     tb = Toolbox(db, web, memory, config)
-    llm = Ollama(config.ollama_url, config.model, config.llm_timeout, config.num_ctx)
+    llm = Ollama(config.ollama_url, config.model, config.llm_timeout, config.num_ctx, think=config.think)
+    fast = llm if config.fast_model == config.model else \
+        Ollama(config.ollama_url, config.fast_model, config.llm_timeout, config.num_ctx)
     cmd, action = args.cmd, getattr(args, "action", None)
 
     try:
         if cmd in (None, "chat"):
             chat_loop(Assistant(tb, llm, config))
         elif cmd in ("research", "plan"):
-            result = Researcher(tb, llm, config, log=_progress).investigate(
+            result = Researcher(tb, llm, config, log=_progress, fast_llm=fast).investigate(
                 " ".join(args.text), args.depth, cmd)
+            t = llm.totals if fast is llm else {k: llm.totals[k] + fast.totals[k] for k in llm.totals}
+            print(f"(model time: {t['seconds'] / 60:.1f} min over {t['calls']} calls, "
+                  f"{t['prompt_tokens']:,} tokens read, {t['output_tokens']:,} written)", file=sys.stderr)
             print(to_json(result) if args.json else result["markdown"])
             if result["path"]:
                 print(f"(saved as report #{result['report_id']}: {result['path']})", file=sys.stderr)
@@ -322,10 +329,29 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({**CARD, "library": db.stats()}, indent=2))
         elif cmd == "serve":
             from .server import serve
-            serve(db, Assistant(tb, llm, config), Researcher(tb, llm, config, log=_progress),
-                  args.host or config.api_host, args.port or config.api_port, config.api_token, memory)
+            from .server import Jobs
+
+            def job_researcher(log):  # each background job gets its own database connection
+                jdb = Store(config.db_path)
+                jmem = ResearchMemory(jdb, build_index(config, jdb), config)
+                return Researcher(Toolbox(jdb, web, jmem, config), llm, config, log=log, fast_llm=fast)
+
+            serve(db, Assistant(tb, llm, config), Researcher(tb, llm, config, log=_progress, fast_llm=fast),
+                  args.host or config.api_host, args.port or config.api_port, config.api_token, memory,
+                  Jobs(job_researcher))
         elif cmd == "doctor":
-            return doctor(config, llm, web, memory)
+            return doctor(config, llm, web, memory, fast)
+        elif cmd == "bench":
+            from . import bench
+            models = [m.strip() for m in (args.models or "").split(",") if m.strip()] or \
+                list(dict.fromkeys([config.model, config.fast_model]))
+            print(f"Benchmarking {', '.join(models)} on this machine (num_ctx {config.num_ctx})…")
+            results = bench.run(models, config.ollama_url, config.num_ctx, config.llm_timeout)
+            if results:
+                print()
+                _print_rows(results, ["model", "score", "recall", "quotes", "honest", "judgement", "synthesis",
+                                      "sec_per_read", "sec_per_think", "read_tps", "write_tps"])
+                print("\nSuggested:\n" + bench.recommend(results))
     except (LLMError, WebError, ValueError, SyntaxError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
@@ -343,16 +369,23 @@ def _print_hits(db: Store, hits: list[dict], kind: str) -> None:
             print(f"      {r['snippet'][:200]}")
 
 
-def doctor(config: Config, llm: Ollama, web: Web, memory: ResearchMemory | None = None) -> int:
+def doctor(config: Config, llm: Ollama, web: Web, memory: ResearchMemory | None = None,
+           fast: Ollama | None = None) -> int:
     ok = True
     print(f"library: {config.db_path}")
     print(f"reports: {config.reports_dir}")
-    print(f"model:   {config.model} via {config.ollama_url}")
-    if llm.available():
-        print("  ✓ Ollama is reachable and the model is installed")
-    else:
-        ok = False
-        print(f"  ✗ not ready — install Ollama (https://ollama.com), then: ollama pull {config.model}")
+    print(f"profile: {config.profile} (context {config.num_ctx} tokens, reads {config.read_chars} characters per source)")
+    for role, m in (("thinker", llm), ("reader", fast or llm)):
+        if role == "reader" and m is llm:
+            print("reader:  same model as the thinker")
+            continue
+        print(f"{role}: {m.model} via {config.ollama_url}" + ("  (thinking on)" if role == "thinker" and config.think else ""))
+        if m.available():
+            print("  ✓ Ollama is reachable and the model is installed")
+        else:
+            ok = False
+            print(f"  ✗ not ready — install Ollama (https://ollama.com), then: ollama pull {m.model}")
+    print("         run `scholar bench` to measure accuracy and speed of models on this machine")
     print(f"search:  {'SearXNG at ' + config.searxng_url if config.searxng_url else 'DuckDuckGo (set SCHOLAR_SEARXNG_URL for your own SearXNG)'}")
     for label, fn in (("web search", lambda: web.search("open source research tools", 3)),
                       ("OpenAlex", lambda: web.openalex("information retrieval", 2)),
