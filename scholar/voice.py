@@ -113,8 +113,11 @@ class Voice:
         if self._whisper is None:
             fw = _require("faster_whisper")
             self._whisper = fw.WhisperModel(self.whisper_model_name, device="auto", compute_type="int8")
-        if isinstance(audio, (bytes, bytearray)) or (isinstance(audio, (str, Path)) and str(audio).endswith(".wav")):
-            audio = wav_to_array(bytes(audio) if isinstance(audio, (bytes, bytearray)) else Path(audio).read_bytes())
+        if isinstance(audio, (str, Path)):
+            audio = Path(audio).read_bytes()
+        if isinstance(audio, (bytes, bytearray)):
+            # WAV is decoded here (light, no ffmpeg); anything else (webm from a browser) goes to Whisper's decoder
+            audio = wav_to_array(bytes(audio)) if bytes(audio[:4]) == b"RIFF" else io.BytesIO(bytes(audio))
         segments, _ = self._whisper.transcribe(audio, language="en", vad_filter=True)
         return " ".join(s.text.strip() for s in segments).strip()
 

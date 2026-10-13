@@ -122,7 +122,7 @@ def test_thinking_only_on_the_fact_check_by_default(tb, config):
     seen = []
 
     class ThinkSpy(Recorder):
-        def chat(self, messages, tools=None, json_mode=False, schema=None, think=None):
+        def chat(self, messages, tools=None, json_mode=False, schema=None, think=None, max_tokens=None):
             out = super().chat(messages, tools, json_mode, schema, think)
             seen.append((self.kinds()[-1], think))
             return out

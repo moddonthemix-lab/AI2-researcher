@@ -259,8 +259,32 @@ def _open_questions(tb: Toolbox, limit: int = 20):
             for q in tb.db.questions(status="unanswered", limit=limit)]
 
 
-def schemas() -> list[dict]:
-    return [schema for schema, _ in TOOLS.values()]
+# Every tool description costs prompt tokens on every round of a conversation — on a CPU that's real
+# time. So chat always gets the core tools, and the specialists only when the message calls for them.
+CORE = ("search_library", "web_search", "read_source", "search_papers", "calculate", "unit_economics",
+        "record_finding", "remember")
+SPECIALISTS = {
+    r"\b(sec|filings?|10-?k|10-?q|annual report|subsidiar|suppliers?|compan(y|ies)|corporat)": ("search_filings", "explore_entity", "add_relation"),
+    r"\b(paper|study|studies|doi|journal|citation|cites?|research(ers)?|evidence|scientific)": ("follow_citations", "wikipedia"),
+    r"\b(table|data|csv|spreadsheet|statistic|chart|analy[sz]|regression|average|median)": ("list_tables", "run_python"),
+    r"\b(risk|scenario|monte carlo|stress|simulat|projection|forecast|worth it|business|profit|revenue)": ("stress_test", "revenue_scenarios"),
+    r"\b(connect|relationship|who owns|owned by|partner|graph|link)": ("explore_entity", "add_relation"),
+    r"\b(update|changed?|wrong|revise|correct|new evidence)": ("update_finding",),
+    r"\b(open questions?|unanswered|still don't know)": ("open_questions",),
+    r"\b(wiki|define|definition|what is|who is|history of)": ("wikipedia",),
+}
+
+
+def schemas(text: str | None = None) -> list[dict]:
+    """All tools, or — given the user's message — the core set plus the specialists it needs."""
+    if text is None:
+        return [schema for schema, _ in TOOLS.values()]
+    import re
+    names = list(CORE)
+    for pattern, extra in SPECIALISTS.items():
+        if re.search(pattern, text, re.I):
+            names += [n for n in extra if n not in names]
+    return [TOOLS[n][0] for n in names if n in TOOLS]
 
 
 def call(tb: Toolbox, name: str, arguments: dict | str | None) -> str:

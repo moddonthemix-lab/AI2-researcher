@@ -114,7 +114,7 @@ optimistic number.
 1. **Ollama + models** (for the default `cpu` profile: Intel Macs and other machines without a GPU)
    ```bash
    ollama pull qwen3:8b            # the thinker: planning, synthesis, the skeptic
-   ollama pull qwen3:4b            # the reader: pulls facts out of every source
+   ollama pull qwen3:4b-instruct   # the reader: pulls facts out of every source (the *instruct* edition — see below)
    ollama pull nomic-embed-text    # semantic memory
    ```
    Then run `scholar bench` to see how accurate and fast they are on *your* machine (see
@@ -169,6 +169,52 @@ Only `.onion` addresses go through Tor. Everything from there is tier 4 and has 
 before it can count toward a *verified* finding. Scholar reads and reports; he doesn't log in, buy,
 download or post anywhere. Keep what you ask him to look at legal where you live.
 
+## His dashboard
+
+```bash
+scholar serve        # then open http://localhost:8766   (Amo's is on 8765)
+```
+
+The same look as Amo's dashboard, light and dark, and it works on a phone on your Wi-Fi
+(`SCHOLAR_API_HOST=0.0.0.0` + a `SCHOLAR_API_TOKEN`). The page is one self-contained file, so it works
+with no internet:
+
+- **Home:** start research or a business plan and watch it live (current step, queue), ask him things (🎤 to
+  talk, 🔊 to hear replies), an inbox for finished research and answers, and library counts.
+- **Reports**, rendered with their citations, skeptic's review, scenarios and sources.
+- **Findings:** filter by verified / reported / disputed…, and open one to see the evidence *for* and
+  *against* (with quotes), the skeptic's flags and how his confidence changed over time.
+- **Open questions** still unanswered, and what's **waiting for the internet**.
+- **Connections:** the research graph, entity by entity (company → subsidiary → supplier…).
+- **Library:** everything he has read, plus the tables he extracted.
+- **Lessons:** teach him (preferences, corrections, strategies) and see his glossary.
+
+### In Open WebUI, next to Amo
+
+Scholar speaks the same OpenAI-style API as Amo (`/v1/models`, `/v1/chat/completions`,
+`/v1/audio/transcriptions`, `/v1/audio/speech`). In Open WebUI: **Settings → Connections → add an OpenAI
+API** with URL `http://localhost:8766/v1` and your `SCHOLAR_API_TOKEN` as the key. "scholar" then shows
+up as a model next to "amo", with voice. Start a message with `research:` or `plan:` and he queues a full
+investigation; the report lands in his dashboard inbox.
+
+## Offline
+
+His brain (Ollama), memory, library and voice all live on your machine, so **almost everything works with
+no internet**: chat, voice, the dashboard, reports, findings, the graph, analysis, and research *from his
+library*. What needs the internet is *new* sources, so:
+
+- He notices when the internet is down (or set `SCHOLAR_OFFLINE=1`) and doesn't waste minutes on timeouts.
+- **Research offline** answers from everything he has ever read plus your own documents. The report says
+  so plainly (📴 Offline), and the full investigation is queued to run **automatically when the internet is
+  back** (the server checks every couple of minutes; `scholar sync` does it now; `scholar pending` shows
+  the queue).
+- **Devices that were away** (an ESP32 terminal off Wi-Fi, a Pi on the road) work like Amo's pocket pet:
+  when they reconnect they `POST /api/sync` with what they were asked
+  (`{"device": "pocket", "items": [{"kind": "ask|research", "text": "...", "at": "..."}]}`). Questions are
+  answered straight away (the brain is local, internet or not), research is queued, and he answers with a
+  line to say: *"While I was offline you asked me … I'm on it — the answers will be on the dashboard."*
+  Answers land in the inbox (`scholar inbox`, the dashboard, `GET /api/inbox`).
+
 ## His voice
 
 He can talk, all locally:
@@ -217,6 +263,8 @@ scholar say --report 3             # read a report's answer aloud
 | `scholar calc` · `scholar economics` | exact arithmetic, unit economics |
 | `scholar feedback "..." --kind preference\|correction\|strategy\|source_note` · `scholar lessons` | teach him; retire a lesson with `lessons --retire ID` |
 | `scholar glossary [term]` · `scholar sources` · `scholar reports` · `scholar report ID` | the library |
+| `scholar serve` | the dashboard (http://localhost:8766) and the API for the family |
+| `scholar inbox` · `scholar pending` · `scholar sync` | messages for you; work waiting for the internet; catch up now |
 | `scholar reindex` · `scholar card` · `scholar doctor` | maintenance |
 
 Each source he reads is one call to the reader, plus a handful of calls to the thinker for planning,
@@ -245,8 +293,8 @@ model has to read and write**, and writing is the slowest part. Scholar is built
 
 | Profile | For | Thinker / reader | Context · read per source |
 |---|---|---|---|
-| `cpu` (default) | Intel Macs, PCs without a GPU | `qwen3:8b` / `qwen3:4b` | 8k tokens · 6,000 chars |
-| `pi` | Raspberry Pi 5 (8–16GB) | `qwen3:4b` / `qwen3:1.7b` | 4k tokens · 3,500 chars |
+| `cpu` (default) | Intel Macs, PCs without a GPU | `qwen3:8b` / `qwen3:4b-instruct` | 8k tokens · 6,000 chars |
+| `pi` | Raspberry Pi 5 (8–16GB) | `qwen3:4b-instruct` / `qwen3:1.7b` | 4k tokens · 3,500 chars |
 | `gpu` | Apple Silicon 32GB+, desktop GPUs | `qwen3:14b` / `qwen3:8b` | 16k tokens · 10,000 chars |
 
 Set `SCHOLAR_PROFILE`, or override any piece (`SCHOLAR_MODEL`, `SCHOLAR_FAST_MODEL`, `SCHOLAR_NUM_CTX`,
@@ -254,7 +302,7 @@ Set `SCHOLAR_PROFILE`, or override any piece (`SCHOLAR_MODEL`, `SCHOLAR_FAST_MOD
 
 ```bash
 scholar bench                                   # your thinker and reader
-scholar bench --models qwen3:4b,qwen3:8b,gpt-oss:20b
+scholar bench --models qwen3:4b-instruct,qwen3:8b,gpt-oss:20b
 ```
 
 `bench` runs each model through Scholar's real prompts on three small documents with known answers
@@ -268,7 +316,7 @@ Measured on a 4-core CPU-only cloud machine with 15GB RAM, a close stand-in for 
 | Model | Score | Fell for the trap? | Quotes real | Seconds per source read | Writes (tokens/s) |
 |---|---:|---|---:|---:|---:|
 | qwen2.5:1.5b | 73 | **yes** — reported the planted "$9 billion" | 100% | 69 | 16.6 |
-| qwen3:4b | 77 | no | 87% | 103 | 6.8 |
+| qwen3:4b (Thinking edition) | 77 | no | 87% | 103 | 6.8 |
 | qwen3:8b | 83 | no | 80% | 142 | 4.2 |
 
 All three found every key fact; the differences were honesty and judgement. A model that obeys
@@ -280,11 +328,20 @@ After the fix, the fact-check (does each quote really support its claim?) on the
 
 | Model | Thinking | Correct | Time |
 |---|---|---:|---:|
-| qwen3:4b | off | 3/3 | 31s |
+| qwen3:4b (Thinking edition) | off | 3/3 | 31s |
 | qwen3:8b | off | 2/3 | 43s |
 | qwen3:8b | on | 3/3 | 148s |
 
 Three items is a small test; treat it as a sign, not a verdict. It's why thinking is on for this one step.
+
+**Watch out for "thinking" editions.** Plain `qwen3:4b` is now Qwen's *Thinking* edition: it reasons out loud
+before every answer even when told not to. That's fine inside research (the answer layouts keep it in check)
+but in conversation one short reply took over 10 minutes on a CPU. Use `qwen3:4b-instruct` (answers in
+seconds) or the hybrid `qwen3:8b`. `scholar doctor` tests your models and warns you.
+
+**16GB of memory: two models at a time.** Each model Ollama keeps loaded takes RAM; past two, the Mac starts
+swapping and everything crawls. Tell Ollama: `launchctl setenv OLLAMA_MAX_LOADED_MODELS 2` (then restart
+Ollama).
 
 **Raspberry Pi 5.** Same code. Either run small models on the Pi itself (`SCHOLAR_PROFILE=pi`: expect
 slow, quick-depth research), or, better, let the Pi borrow a stronger machine's brain:
@@ -319,7 +376,11 @@ SCHOLAR_API_HOST=0.0.0.0 SCHOLAR_API_TOKEN=change-me scholar serve     # port 87
 | POST | `/api/feedback` `{"text": "...", "kind": "preference"}` | a lesson. **Boss only:** refused when `from` is another agent |
 | POST | `/api/research` or `/api/plan` with `"async": true` | queue it as a background job → `{"job_id", "poll"}` |
 | GET | `/api/jobs` · `/api/jobs/<id>` | job status: queued (with position) / running (current step) / done (report id) / failed |
-| GET | `/api/brief` | under-1KB status for small screens (ESP32) |
+| GET | `/api/brief` | under-1KB status for small screens (ESP32): busy, online, unread news |
+| POST | `/api/sync` `{"device", "items"}` | a device reconnected: what it was asked while offline |
+| GET | `/api/inbox?unread=1` · POST `/api/inbox/read` · GET `/api/pending` · POST `/api/catch-up` | inbox and queue |
+| GET | `/` | the dashboard |
+| | `/v1/models` · `/v1/chat/completions` · `/v1/audio/transcriptions` · `/v1/audio/speech` | OpenAI-style, for Open WebUI |
 | POST | `/api/listen` (body: WAV) · `/api/speak` `{"text"}` | voice terminal: speech in → answer; text → WAV |
 
 Send `Authorization: Bearer <SCHOLAR_API_TOKEN>` when a token is set. Always set one before

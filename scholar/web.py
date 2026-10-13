@@ -46,13 +46,19 @@ class WebError(RuntimeError):
     pass
 
 
+class OfflineError(WebError):
+    """No internet right now — Scholar answers from his library and queues the rest."""
+
+
 def html_to_text(html: str) -> dict:
     d = parse_html(html)
     return {"title": d.title, "published": d.published, "description": d.description, "text": d.text}
 
 
 def _strip_tags(s: str) -> str:
-    return re.sub(r"\s+", " ", unescape(re.sub(r"<[^>]+>", "", s or ""))).strip()
+    # Some publishers' metadata is HTML-escaped twice ("SEC&amp;nbsp;Filings"), so decode twice.
+    text = unescape(unescape(re.sub(r"<[^>]+>", "", s or "")))
+    return re.sub(r"\s+", " ", text.replace("\xa0", " ")).strip()
 
 
 # ------------------------------------------------------------------ Tor / SOCKS
@@ -81,8 +87,11 @@ def _socks5_connect(proxy: str, host: str, port: int, timeout: float) -> socket.
 # ------------------------------------------------------------------------ Web
 class Web:
     def __init__(self, searxng_url: str = "", tor_proxy: str = "", timeout: float = 25,
-                 allow_private: bool = False, openalex_key: str = "", contact: str = ""):
+                 allow_private: bool = False, openalex_key: str = "", contact: str = "",
+                 offline: bool = False):
         self.searxng_url = searxng_url.rstrip("/")
+        self.force_offline = offline        # SCHOLAR_OFFLINE=1: never touch the internet
+        self._online: tuple[float, bool] = (0.0, True)
         self.openalex_key = openalex_key
         self.contact = contact
         self._robots: dict[str, urllib.robotparser.RobotFileParser | None] = {}
@@ -98,6 +107,33 @@ class Web:
                 return super().redirect_request(req, fp, code, msg, headers, newurl)
 
         self._opener = urllib.request.build_opener(_CheckedRedirects)
+
+    # ---- connectivity
+    CHECK_URLS = ("https://www.gstatic.com/generate_204", "https://cloudflare.com/cdn-cgi/trace")
+
+    def online(self, max_age: float = 60) -> bool:
+        """Is the internet reachable? Checked quickly and remembered for a minute."""
+        if self.force_offline:
+            return False
+        checked, ok = self._online
+        if time.monotonic() - checked < max_age:
+            return ok
+        ok = False
+        for url in self.CHECK_URLS:
+            try:
+                with urllib.request.urlopen(urllib.request.Request(url, method="HEAD"), timeout=4):
+                    ok = True
+            except urllib.error.HTTPError:
+                ok = True   # any answer means we're online
+            except (urllib.error.URLError, OSError):
+                continue
+            if ok:
+                break
+        self._online = (time.monotonic(), ok)
+        return ok
+
+    def _went_offline(self) -> None:
+        self._online = (time.monotonic(), False)
 
     # ---- low-level GET
     def _check_target(self, url: str) -> urllib.parse.ParseResult:
@@ -125,6 +161,11 @@ class Web:
         u = self._check_target(url)
         if u.hostname.endswith(".onion"):
             return self._get_via_tor(url, accept)
+        if self.force_offline:
+            raise OfflineError("offline mode is on (SCHOLAR_OFFLINE=1)")
+        checked, ok = self._online
+        if not ok and time.monotonic() - checked < 60:  # known offline: fail now, don't wait on timeouts
+            raise OfflineError("no internet connection right now")
         req = urllib.request.Request(url, headers={"User-Agent": agent, "Accept": accept,
                                                    "Accept-Language": "en-US,en;q=0.8", **(headers or {})})
         for attempt in (1, 2):
@@ -139,6 +180,8 @@ class Web:
                 raise WebError(f"{url} returned HTTP {e.code}"
                                + (" (rate limited — try again in a minute)" if e.code == 429 else "")) from e
             except (urllib.error.URLError, OSError) as e:
+                if not self.online(max_age=0):
+                    raise OfflineError(f"no internet connection (couldn't reach {u.hostname})") from e
                 raise WebError(f"could not reach {url}: {getattr(e, 'reason', e)}") from e
         raise WebError(f"could not read {url}")
 
@@ -387,7 +430,7 @@ def parse_crossref(data: dict) -> list[dict]:
         if not url:
             continue
         out.append({
-            "title": " ".join(it.get("title") or []), "url": url,
+            "title": _strip_tags(" ".join(it.get("title") or [])), "url": url,
             "snippet": _strip_tags(it.get("abstract", ""))[:1500],
             "published": "-".join(str(p) for p in parts[0]), "authors": ", ".join(authors[:4]),
             "venue": " ".join(it.get("container-title") or []),
@@ -410,7 +453,7 @@ def parse_openalex_work(w: dict) -> dict:
     venue = ((loc.get("source") or {}).get("display_name")) or ""
     authors = [(a.get("author") or {}).get("display_name", "") for a in w.get("authorships", [])]
     out = {
-        "title": w.get("display_name") or w.get("title") or "", "url": url, "doi": doi,
+        "title": _strip_tags(w.get("display_name") or w.get("title") or ""), "url": url, "doi": doi,
         "snippet": _abstract(w.get("abstract_inverted_index"))[:1500],
         "published": w.get("publication_date") or str(w.get("publication_year") or ""),
         "authors": ", ".join(a for a in authors[:4] if a), "venue": venue,

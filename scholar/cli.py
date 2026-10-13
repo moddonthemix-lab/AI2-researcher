@@ -116,6 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("lessons", help="What Scholar has learned from your feedback")
     s.add_argument("--retire", type=int, help="stop applying this lesson")
     sub.add_parser("reindex", help="Rebuild semantic memory (e.g. after switching to Qdrant)")
+    sub.add_parser("pending", help="Work waiting for the internet (offline rechecks, questions from devices)")
+    sub.add_parser("sync", help="Catch up now: answer queued questions, run queued research if online")
+    s = sub.add_parser("inbox", help="Messages from Scholar (finished research, answers to queued questions)")
+    s.add_argument("--all", action="store_true", help="include read messages")
 
     r = sub.add_parser("remember", help="Save a note")
     r.add_argument("text", nargs="+")
@@ -149,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int)
     sub.add_parser("doctor", help="Check Ollama, the model and internet access")
     b = sub.add_parser("bench", help="Measure accuracy and speed of models on this machine")
-    b.add_argument("--models", help="comma-separated, e.g. qwen3:4b,qwen3:8b,gpt-oss:20b (default: your two)")
+    b.add_argument("--models", help="comma-separated, e.g. qwen3:4b-instruct,qwen3:8b,gpt-oss:20b (default: your two)")
     return p
 
 
@@ -215,7 +219,8 @@ def main(argv: list[str] | None = None) -> int:
     config = Config()
     config.ensure_home()
     db = Store(config.db_path)
-    web = Web(config.searxng_url, config.tor_proxy, openalex_key=config.openalex_key, contact=config.contact)
+    web = Web(config.searxng_url, config.tor_proxy, openalex_key=config.openalex_key, contact=config.contact,
+              offline=config.offline)
     memory = ResearchMemory(db, build_index(config, db), config)
     tb = Toolbox(db, web, memory, config)
     llm = Ollama(config.ollama_url, config.model, config.llm_timeout, config.num_ctx, think=config.think == "all")
@@ -353,6 +358,23 @@ def main(argv: list[str] | None = None) -> int:
                 print("retired" if db.retire_lesson(args.retire) else "not found")
             else:
                 _print_rows(db.lessons(), ["id", "kind", "origin", "ref", "created_at", "text"], 90)
+        elif cmd == "pending":
+            _print_rows(db.pending(), ["id", "kind", "origin", "asked_at", "depth", "text"], 90)
+            print("internet: " + ("online" if web.online() else "offline"))
+        elif cmd == "sync":
+            from . import offline
+            ask = lambda text, device: Assistant(tb, llm, config).ask(text, device)  # noqa: E731
+
+            def run_now(kind, text, depth, origin):
+                r = Researcher(tb, llm, config, log=_progress, fast_llm=fast).investigate(text, depth, kind)
+                db.notify(f"Research done: {text}\n\n{r['data'].get('answer', '')}", f"report:{r['report_id']}")
+                return f"report:{r['report_id']}"
+            out = offline.process(db, web.online, ask, run_now, _progress)
+            print(f"{'online' if out['online'] else 'offline'}: {len(out['done'])} done, {out['waiting']} still waiting")
+        elif cmd == "inbox":
+            for m in reversed(db.inbox(not args.all, 50)):
+                print(f"— #{m['id']} {m['created_at']}" + ("" if m["read"] else "  (new)") + f"\n{m['text']}\n")
+            db.mark_read()
         elif cmd == "reindex":
             print(json.dumps(memory.reindex(_progress), indent=2))
         elif cmd == "stress":
@@ -383,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
             from .voice import Voice
             serve(db, Assistant(tb, llm, config), Researcher(tb, llm, config, log=_progress, fast_llm=fast),
                   args.host or config.api_host, args.port or config.api_port, config.api_token, memory,
-                  Jobs(job_researcher), Voice(config.whisper_model, config.piper_voice, config.say_voice))
+                  Jobs(job_researcher), Voice(config.whisper_model, config.piper_voice, config.say_voice), web)
         elif cmd == "doctor":
             return doctor(config, llm, web, memory, fast)
         elif cmd == "bench":
@@ -428,10 +450,18 @@ def doctor(config: Config, llm: Ollama, web: Web, memory: ResearchMemory | None 
               + (f"  (thinking: {config.think})" if role == "thinker" else ""))
         if m.available():
             print("  ✓ Ollama is reachable and the model is installed")
+            try:
+                if not m.talks_plainly():
+                    print(f"  ⚠ {m.model} thinks out loud even with thinking off — chat replies will be very slow. "
+                          "Use an Instruct edition (e.g. qwen3:4b-instruct) or a hybrid model (qwen3:8b).")
+            except LLMError as e:
+                print(f"  ⚠ couldn't test the model: {e}")
         else:
             ok = False
             print(f"  ✗ not ready — install Ollama (https://ollama.com), then: ollama pull {m.model}")
     print("         run `scholar bench` to measure accuracy and speed of models on this machine")
+    print("internet: " + ("off (SCHOLAR_OFFLINE=1)" if config.offline else "online" if web.online()
+                          else "OFFLINE — he'll answer from his library and queue research for later"))
     print(f"search:  {'SearXNG at ' + config.searxng_url if config.searxng_url else 'DuckDuckGo (set SCHOLAR_SEARXNG_URL for your own SearXNG)'}")
     for label, fn in (("web search", lambda: web.search("open source research tools", 3)),
                       ("OpenAlex", lambda: web.openalex("information retrieval", 2)),

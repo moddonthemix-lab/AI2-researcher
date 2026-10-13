@@ -77,15 +77,16 @@ class Ollama:
         return None  # model doesn't think; don't send the flag
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
-             json_mode: bool = False, schema: dict | None = None, think: bool | None = None) -> dict:
+             json_mode: bool = False, schema: dict | None = None, think: bool | None = None,
+             max_tokens: int | None = None) -> dict:
         """Return the assistant message dict (``content`` and maybe ``tool_calls``).
 
         ``schema`` (a JSON schema) constrains the answer exactly; ``json_mode`` only asks for some JSON.
         """
         options = {"temperature": 0.2, "num_ctx": self.num_ctx}  # a researcher should be steady, not creative
         structured = json_mode or schema is not None
-        if structured:
-            options["num_predict"] = self.max_output  # a stuck model can't ramble forever
+        if structured or max_tokens:
+            options["num_predict"] = max_tokens or self.max_output  # a stuck model can't ramble forever
         payload = {"model": self.model, "messages": messages, "stream": False, "options": options}
         if tools:
             payload["tools"] = tools
@@ -126,6 +127,12 @@ class Ollama:
         self.totals["prompt_tokens"] += self.last["prompt_tokens"]
         self.totals["output_tokens"] += self.last["output_tokens"]
         self.totals["seconds"] = round(self.totals["seconds"] + wall, 1)
+
+    def talks_plainly(self) -> bool:
+        """Does the model answer directly when thinking is off? (Some editions reason out loud regardless.)"""
+        msg = self.chat([{"role": "user", "content": "Reply with exactly one word: OK"}], think=False, max_tokens=40)
+        reply = (msg.get("content") or "").strip()
+        return len(reply) <= 12 and "ok" in reply.lower()
 
     def available(self) -> bool:
         try:

@@ -24,5 +24,8 @@ scholar = "scholar.cli:main"
 [tool.setuptools]
 packages = ["scholar"]
 
+[tool.setuptools.package-data]
+scholar = ["static/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

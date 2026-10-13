@@ -198,6 +198,29 @@ CREATE TABLE IF NOT EXISTS lessons (
     created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 
+-- Work waiting for the internet: investigations answered offline that need a recheck, and things a
+-- device (ESP32 terminal, Pi) was asked while it couldn't reach Scholar.
+CREATE TABLE IF NOT EXISTS pending (
+    id          INTEGER PRIMARY KEY,
+    kind        TEXT NOT NULL,                  -- research | plan | ask
+    text        TEXT NOT NULL,
+    depth       TEXT NOT NULL DEFAULT 'quick',
+    origin      TEXT NOT NULL DEFAULT '',       -- offline-recheck | device name
+    ref         TEXT NOT NULL DEFAULT '',       -- e.g. investigation:3
+    asked_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    done_at     TEXT,
+    result      TEXT NOT NULL DEFAULT ''        -- e.g. job:4 / report:7 / the answer
+);
+
+-- Messages for the boss (answers to queued questions, finished research), shown on the dashboard.
+CREATE TABLE IF NOT EXISTS inbox (
+    id          INTEGER PRIMARY KEY,
+    text        TEXT NOT NULL,
+    ref         TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+    read        INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS reports (
     id          INTEGER PRIMARY KEY,
     question    TEXT NOT NULL,
@@ -234,9 +257,13 @@ def _finding(row: sqlite3.Row | dict | None) -> dict | None:
 
 class Store:
     def __init__(self, path: str | Path = ":memory:"):
-        self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        self.path = str(path)
+        self.conn = sqlite3.connect(self.path, check_same_thread=False, timeout=15)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        if self.path != ":memory:":
+            # Readers (the dashboard) and a writer (background research) can work at the same time.
+            self.conn.execute("PRAGMA journal_mode = WAL")
         self.conn.executescript(SCHEMA)
 
     def close(self) -> None:
@@ -578,6 +605,36 @@ class Store:
         with self.conn:
             return self.conn.execute("UPDATE lessons SET active = 0 WHERE id = ?", (lesson_id,)).rowcount > 0
 
+    # ------------------------------------------------- pending work, inbox
+    def add_pending(self, kind: str, text: str, depth: str = "quick", origin: str = "", ref: str = "",
+                    asked_at: str | None = None) -> int:
+        return self._insert(
+            """INSERT INTO pending(kind, text, depth, origin, ref, asked_at)
+               VALUES (?, ?, ?, ?, ?, COALESCE(?, datetime('now','localtime')))""",
+            (kind, text, depth, origin, ref, asked_at))
+
+    def pending(self, include_done: bool = False, limit: int = 100) -> list[dict]:
+        where = "" if include_done else "WHERE done_at IS NULL"
+        return _rows(self.conn.execute(f"SELECT * FROM pending {where} ORDER BY id LIMIT ?", (limit,)))
+
+    def finish_pending(self, pid: int, result: str = "") -> None:
+        with self.conn:
+            self.conn.execute("UPDATE pending SET done_at = datetime('now','localtime'), result = ? WHERE id = ?",
+                              (result, pid))
+
+    def notify(self, text: str, ref: str = "") -> int:
+        return self._insert("INSERT INTO inbox(text, ref) VALUES (?, ?)", (text, ref))
+
+    def inbox(self, unread_only: bool = False, limit: int = 30) -> list[dict]:
+        where = "WHERE read = 0" if unread_only else ""
+        return _rows(self.conn.execute(f"SELECT * FROM inbox {where} ORDER BY id DESC LIMIT ?", (limit,)))
+
+    def mark_read(self, msg_id: int | None = None) -> int:
+        with self.conn:
+            if msg_id is None:
+                return self.conn.execute("UPDATE inbox SET read = 1 WHERE read = 0").rowcount
+            return self.conn.execute("UPDATE inbox SET read = 1 WHERE id = ?", (msg_id,)).rowcount
+
     # ------------------------------------------------------------------- stats
     def stats(self) -> dict:
         one = lambda sql: self.conn.execute(sql).fetchone()[0]  # noqa: E731
@@ -597,6 +654,8 @@ class Store:
             "glossary": one("SELECT COUNT(*) FROM glossary"),
             "lessons": one("SELECT COUNT(*) FROM lessons WHERE active = 1"),
             "useful_queries": one("SELECT COUNT(*) FROM queries WHERE facts > 0"),
+            "pending": one("SELECT COUNT(*) FROM pending WHERE done_at IS NULL"),
+            "unread": one("SELECT COUNT(*) FROM inbox WHERE read = 0"),
         }
 
 

@@ -12,7 +12,7 @@ class FakeLLM:
         self.script = list(script)
         self.calls = []
 
-    def chat(self, messages, tools=None, json_mode=False, schema=None, think=None):
+    def chat(self, messages, tools=None, json_mode=False, schema=None, think=None, max_tokens=None):
         self.calls.append(json.loads(json.dumps(messages)))
         return self.script.pop(0)
 
@@ -84,3 +84,12 @@ def test_new_tools(tb):
     assert "prob_monthly_loss" in st
     lib = json.loads(tools.call(tb, "search_library", {"query": "sneaker prices"}))
     assert set(lib) == {"findings", "passages", "past_investigations", "glossary", "lessons"}
+
+
+def test_chat_sends_only_the_tools_a_message_needs():
+    names = lambda text: {s["function"]["name"] for s in tools.schemas(text)}  # noqa: E731
+    core = set(tools.CORE)
+    assert names("hello there") == core
+    assert {"search_filings", "explore_entity"} <= names("Who supplies Tesla? Check their 10-K filings")
+    assert "run_python" in names("compute the median of this table") and "search_filings" not in names("hi")
+    assert len(tools.schemas("hello")) < len(tools.schemas())

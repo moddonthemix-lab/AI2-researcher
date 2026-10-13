@@ -72,6 +72,10 @@ class Assistant:
         self.llm = llm
         self.config = config or Config()
         self.history: list[dict] = []
+        # Conversation is quick back-and-forth: no thinking out loud (unless SCHOLAR_THINK=all), and a cap on
+        # length — a long essay costs minutes on a CPU. Full write-ups are what `research` is for.
+        self.think = getattr(self.config, "think", "checks") == "all"
+        self.max_reply = 900
 
     def system_prompt(self, user_text: str, from_agent: str = "") -> str:
         c = self.config
@@ -94,7 +98,7 @@ class Assistant:
         messages = [{"role": "system", "content": self.system_prompt(user_text, from_agent)}, *self.history]
 
         for _ in range(MAX_TOOL_ROUNDS):
-            msg = self.llm.chat(messages, tools.schemas())
+            msg = self.llm.chat(messages, tools.schemas(user_text), think=self.think, max_tokens=self.max_reply)
             calls = msg.get("tool_calls") or []
             messages.append(msg)
             if not calls:

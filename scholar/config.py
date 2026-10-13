@@ -21,8 +21,10 @@ def _env(name: str, default: str = "") -> str:
 #   pi   — Raspberry Pi 5 (8-16GB): small models, short reads; or point SCHOLAR_OLLAMA_URL at a bigger machine
 #   gpu  — Apple Silicon with 32GB+ or a desktop GPU: bigger models, longer reads
 PROFILES = {
-    "cpu": {"model": "qwen3:8b", "fast_model": "qwen3:4b", "num_ctx": 8192, "read_chars": 6000, "whisper": "base.en"},
-    "pi":  {"model": "qwen3:4b", "fast_model": "qwen3:1.7b", "num_ctx": 4096, "read_chars": 3500, "whisper": "tiny.en"},
+    # Note: plain "qwen3:4b" is now Qwen's *Thinking* edition, which reasons out loud even when told not to —
+    # minutes per chat reply on a CPU. The Instruct edition answers directly.
+    "cpu": {"model": "qwen3:8b", "fast_model": "qwen3:4b-instruct", "num_ctx": 8192, "read_chars": 6000, "whisper": "base.en"},
+    "pi":  {"model": "qwen3:4b-instruct", "fast_model": "qwen3:1.7b", "num_ctx": 4096, "read_chars": 3500, "whisper": "tiny.en"},
     "gpu": {"model": "qwen3:14b", "fast_model": "qwen3:8b", "num_ctx": 16384, "read_chars": 10000, "whisper": "small.en"},
 }
 
@@ -61,6 +63,8 @@ class Config:
     llm_timeout: int = field(default_factory=lambda: int(_env("SCHOLAR_LLM_TIMEOUT", "900")))
     assistant_name: str = field(default_factory=lambda: _env("SCHOLAR_NAME", "Scholar"))
     user_name: str = field(default_factory=lambda: _env("SCHOLAR_USER", "boss"))
+    # Never touch the internet (Scholar also notices on his own when it's down)
+    offline: bool = field(default_factory=lambda: _env("SCHOLAR_OFFLINE", "0").lower() in ("1", "true", "yes"))
     # Search: a self-hosted SearXNG is the most private and reliable; DuckDuckGo is the fallback.
     searxng_url: str = field(default_factory=lambda: _env("SCHOLAR_SEARXNG_URL"))
     # Optional Tor SOCKS5 proxy (e.g. 127.0.0.1:9050) — enables reading .onion sources.

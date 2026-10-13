@@ -39,7 +39,7 @@ from .credibility import TIER_LABELS
 from .llm import Ollama, parse_json
 from .memory import ResearchMemory
 from .tools import Toolbox
-from .web import WebError
+from .web import OfflineError, WebError
 
 DEPTHS = {
     "quick":    {"questions": 6,  "rounds": 1, "reads": 6,  "per_query": 5, "hops": 0, "followups": 3,
@@ -357,6 +357,7 @@ class Researcher:
         self.log = log or (lambda msg: None)
         self.memory = memory or getattr(toolbox, "memory", None) or ResearchMemory(self.db, None, self.config)
         self._queries: dict[int, list[dict]] = {}
+        self._offline = False
 
     def _json(self, prompt: str, step: str, schema: dict | None = None) -> dict:
         llm = self.fast if step in FAST_STEPS else self.llm
@@ -419,6 +420,8 @@ class Researcher:
 
     # ========================================================= gathering
     def search(self, q: str, where: str, n: int, inv: int, qid: int | None) -> list[dict]:
+        if self._offline and where != "library":
+            return []  # the online recheck will run these searches
         self.log(f"  searching {where}: {q}")
         try:
             if where == "papers":
@@ -428,13 +431,18 @@ class Researcher:
             elif where == "filings":
                 results, kind = self.tb.web.filings(q, limit=n), "filing"
             elif where == "library":
+                # Online, the web covers what he's read before; offline, everything he has ever read counts.
                 results = [{"title": c["title"], "url": c["url"], "snippet": c["text"],
                             "domain": c.get("domain") or "my library", "tier": c["tier"],
                             "source_id": c["source_id"], "library_text": c["text"]}
-                           for c in self.memory.search_library(q, n, own_only=True)]
+                           for c in self.memory.search_library(q, n, own_only=not self._offline)]
                 kind = "library"
             else:
                 results, kind = self.tb.web.search(q, n), "web"
+        except OfflineError as e:
+            self.log(f"    went offline ({e}) — continuing from the library")
+            self._offline = True
+            return []
         except WebError as e:
             self.log(f"    skipped: {e}")
             results, kind = [], where
@@ -591,6 +599,8 @@ class Researcher:
         business = mode == "plan" or bool(_BUSINESS_WORDS.search(question))
         inv = self.db.start_investigation(question, mode, depth)
         self._queries = {}
+        online = getattr(self.tb.web, "online", lambda: True)
+        self._offline = not online()
         try:
             return self._investigate(inv, question, depth, mode, budget, business)
         except BaseException:
@@ -598,6 +608,8 @@ class Researcher:
             raise
 
     def _investigate(self, inv: int, question: str, depth: str, mode: str, budget: dict, business: bool) -> dict:
+        if self._offline:
+            self.log("offline — researching from my library and memory; I'll recheck online later")
         self.log("recalling what I already know…")
         mem = self.memory.recall(question)
         memory_text = self.memory.as_prompt(mem)
@@ -625,6 +637,8 @@ class Researcher:
             for q in open_qs:
                 for spec in self._queries.get(q["id"], [{"q": _short(q["text"]), "where": "web"}]):
                     hits += self.search(spec["q"], spec["where"], budget["per_query"], inv, q["id"])
+                if self._offline:  # every question gets its own look through the library
+                    hits += self.search(q["text"], "library", 3, inv, q["id"])
             hits += self.search(restated, "library", 3, inv, None)  # always check the boss's own library
             if len({h["url"] for h in hits} - read_urls) < 3:  # engines down or thin: widen
                 for where in ("papers", "wiki", "web") + (("filings",) if _COMPANY_WORDS.search(question) else ()):
@@ -658,8 +672,11 @@ class Researcher:
 
         if not facts:
             self.log("no usable evidence — not writing an answer from memory")
-            synth = {"answer": "", "next_steps": ["Retry later (search engines may have been rate-limiting), set "
-                                                  "SCHOLAR_SEARXNG_URL, add SCHOLAR_OPENALEX_KEY, or try --depth deep."]}
+            synth = {"answer": "", "next_steps": [
+                "I'm offline and my library doesn't cover this yet — I've queued it to research when the internet "
+                "is back." if self._offline else
+                "Retry later (search engines may have been rate-limiting), set SCHOLAR_SEARXNG_URL, add "
+                "SCHOLAR_OPENALEX_KEY, or try --depth deep."]}
         else:
             synth = self._synthesize(inv, restated, sources, facts, mode, memory_text)
         findings = self._record(inv, question, synth, sources, facts, checked)
@@ -906,8 +923,11 @@ class Researcher:
                 facts: list[dict], findings: list[dict], synth: dict, mem: dict) -> dict:
         findings = [self.db.get_finding(f["id"]) for f in findings]
         qs = self.db.questions(inv)
+        if self._offline:  # answered from the library: queue the full online investigation
+            self.db.add_pending(mode, question, depth, "offline-recheck", f"investigation:{inv}")
         data = {
             "investigation_id": inv, "question": question, "restated": restated, "mode": mode, "depth": depth,
+            "offline": self._offline,
             "answer": str(synth.get("answer", "")),
             "findings": [{"id": f["id"], "claim": f["claim"], "status": f["status"], "confidence": f["confidence"],
                           "source_ids": f["source_ids"], "checks": f["checks"],
@@ -1000,6 +1020,9 @@ def render(d: dict) -> str:
            f"_Scholar · {datetime.now():%Y-%m-%d %H:%M} · investigation #{d.get('investigation_id', '-')} · "
            f"depth: {d['depth']} · {len(d['sources'])} sources · {answered}/{len(qs)} sub-questions answered · "
            f"quotes verified: {d['quotes_checked']}_", ""]
+    if d.get("offline"):
+        out += ["> 📴 **Offline:** answered only from Scholar's library and memory — no live sources. The full "
+                "investigation is queued and will run when the internet is back.", ""]
     if d.get("restated") and d["restated"] != d["question"]:
         out += [f"**Question as investigated:** {d['restated']}", ""]
     out += ["## Answer", "", d.get("answer") or "_The evidence gathered was not enough to answer this._", ""]
@@ -1036,9 +1059,13 @@ def render(d: dict) -> str:
                 + (f" ({r['date']})" if r.get("date") else "") + (f" [S{r['source_id']}]" if r.get("source_id") else "")
                 for r in d["graph"][:25]]
         out.append("")
-    if d.get("tables"):
+    tables = sorted((t for t in d.get("tables", []) if t["caption"] or t["rows"] >= 5),
+                    key=lambda t: (not t["caption"], -t["rows"]))
+    if tables:
         out += ["## Tables extracted (analyze with `scholar analyze`)", ""]
-        out += [f"- T{t['table_id']}: {t['caption'] or 'untitled'} ({t['rows']}×{t['cols']})" for t in d["tables"][:20]]
+        out += [f"- T{t['table_id']}: {t['caption'] or 'untitled'} ({t['rows']}×{t['cols']})" for t in tables[:12]]
+        if len(d["tables"]) > len(tables[:12]):
+            out.append(f"- …and {len(d['tables']) - len(tables[:12])} smaller tables (`scholar tables`)")
         out.append("")
     out += ["## Sources", ""]
     for s in sorted(d["sources"], key=lambda s: s["id"]):

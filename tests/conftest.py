@@ -83,7 +83,7 @@ class RoutingLLM:
         self.chat_script = list(chat or [])
         self.prompts = []
 
-    def chat(self, messages, tools=None, json_mode=False, schema=None, think=None):
+    def chat(self, messages, tools=None, json_mode=False, schema=None, think=None, max_tokens=None):
         prompt = messages[-1]["content"]
         self.prompts.append(prompt)
         self.schemas = getattr(self, "schemas", []) + [schema]
