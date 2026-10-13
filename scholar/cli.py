@@ -223,9 +223,11 @@ def main(argv: list[str] | None = None) -> int:
               offline=config.offline)
     memory = ResearchMemory(db, build_index(config, db), config)
     tb = Toolbox(db, web, memory, config)
-    llm = Ollama(config.ollama_url, config.model, config.llm_timeout, config.num_ctx, think=config.think == "all")
+    llm = Ollama(config.ollama_url, config.model, config.llm_timeout, config.num_ctx, think=config.think == "all",
+                 one_at_a_time=config.one_model_at_a_time)
     fast = llm if config.fast_model == config.model else \
-        Ollama(config.ollama_url, config.fast_model, config.llm_timeout, config.num_ctx)
+        Ollama(config.ollama_url, config.fast_model, config.llm_timeout, config.num_ctx,
+               one_at_a_time=config.one_model_at_a_time)
     cmd, action = args.cmd, getattr(args, "action", None)
 
     try:
@@ -460,6 +462,16 @@ def doctor(config: Config, llm: Ollama, web: Web, memory: ResearchMemory | None 
             ok = False
             print(f"  ✗ not ready — install Ollama (https://ollama.com), then: ollama pull {m.model}")
     print("         run `scholar bench` to measure accuracy and speed of models on this machine")
+    print("memory:  " + ("one model at a time (Scholar unloads the last one before switching)"
+                         if config.one_model_at_a_time else "several models may stay loaded (SCHOLAR_ONE_MODEL=0)"))
+    from .llm import loaded_models
+    loaded = [m for m in loaded_models(config.ollama_url) if "embed" not in m["name"]]
+    if loaded:
+        print("         loaded right now: " + ", ".join(f"{m['name']} ({m['size_gb']} GB)" for m in loaded))
+    if len(loaded) > 1:
+        print(f"  ⚠ {len(loaded)} chat models are in memory at once (maybe Amo's too). On a 16GB machine that "
+              "makes everything swap to disk and crawl. Make it a rule for every app on this Mac:\n"
+              "      launchctl setenv OLLAMA_MAX_LOADED_MODELS 1   (then quit and reopen Ollama)")
     print("internet: " + ("off (SCHOLAR_OFFLINE=1)" if config.offline else "online" if web.online()
                           else "OFFLINE — he'll answer from his library and queue research for later"))
     print(f"search:  {'SearXNG at ' + config.searxng_url if config.searxng_url else 'DuckDuckGo (set SCHOLAR_SEARXNG_URL for your own SearXNG)'}")

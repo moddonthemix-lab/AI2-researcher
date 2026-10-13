@@ -134,3 +134,36 @@ def test_thinking_only_on_the_fact_check_by_default(tb, config):
     seen.clear()
     Researcher(tb, llm, config).investigate("Is sneaker resale growing?", "quick")
     assert not any(t for _, t in seen)
+
+
+def test_one_model_in_memory_at_a_time():
+    seen = []
+    srv, url = _fake_ollama({"ok": 1}, seen)
+    try:
+        thinker, reader = Ollama(url, "qwen3:8b"), Ollama(url, "qwen3:4b-instruct")
+        for llm in (thinker, thinker, reader, thinker):
+            llm.chat([{"role": "user", "content": "x"}], json_mode=True)
+        unloads = [(b["model"], b["keep_alive"]) for b in seen if "keep_alive" in b]
+        # thinker twice (no switch), then reader (drop the thinker), then thinker (drop the reader)
+        assert unloads == [("qwen3:8b", 0), ("qwen3:4b-instruct", 0)]
+        seen.clear()
+        relaxed = Ollama(url, "qwen3:14b", one_at_a_time=False)
+        relaxed.chat([{"role": "user", "content": "x"}], json_mode=True)
+        assert not any("keep_alive" in b for b in seen)
+    finally:
+        srv.shutdown()
+
+
+def test_after_a_restart_his_other_model_is_unloaded_but_not_other_apps_models(monkeypatch):
+    import scholar.llm as L
+    seen = []
+    srv, url = _fake_ollama({"ok": 1}, seen)
+    try:
+        monkeypatch.setattr(L, "_last_model", {})
+        monkeypatch.setattr(L, "loaded_models", lambda u, timeout=5: [{"name": "qwen3:8b", "size_gb": 6.8},
+                                                                      {"name": "amo-model:latest", "size_gb": 5.0}])
+        Ollama(url, "qwen3:8b")  # Scholar's thinker, still loaded from the last run
+        Ollama(url, "qwen3:4b-instruct").chat([{"role": "user", "content": "x"}], json_mode=True)
+        assert [b["model"] for b in seen if "keep_alive" in b] == ["qwen3:8b"]  # not Amo's
+    finally:
+        srv.shutdown()

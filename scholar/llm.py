@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -32,11 +33,31 @@ class LLMError(RuntimeError):
     pass
 
 
+# One model in memory at a time. A 16GB machine can't hold Scholar's thinker *and* reader (let alone Amo's
+# models too): past the limit it swaps to disk and a 5-second answer takes 7 minutes. So before switching
+# models, Scholar asks Ollama to unload the one he used last. Shared by every Ollama client in the process.
+_switch_lock = threading.Lock()
+_last_model: dict[str, str] = {}   # Ollama URL -> the chat model Scholar used last
+_mine: dict[str, set[str]] = {}    # Ollama URL -> Scholar's own chat models (never touch other apps' models)
+
+
+def loaded_models(url: str, timeout: float = 5) -> list[dict]:
+    """What Ollama has in memory right now (any app's models): [{"name", "size_gb"}]."""
+    try:
+        with urllib.request.urlopen(url.rstrip("/") + "/api/ps", timeout=timeout) as resp:
+            models = json.loads(resp.read()).get("models", [])
+    except (urllib.error.URLError, OSError, ValueError):
+        return []
+    return [{"name": m.get("name", ""), "size_gb": round(m.get("size", 0) / 1e9, 1)} for m in models]
+
+
 class Ollama:
     def __init__(self, url: str, model: str, timeout: float = 900, num_ctx: int = 8192,
-                 think: bool = False, max_output: int = 2500):
+                 think: bool = False, max_output: int = 2500, one_at_a_time: bool = True):
         self.url = url.rstrip("/")
         self.model = model
+        self.one_at_a_time = one_at_a_time  # unload the previous model before using this one
+        _mine.setdefault(self.url, set()).add(model)
         self.timeout = timeout
         # Ollama's default context is only 2-4k tokens and it silently drops the start of longer
         # prompts — ask for a real window. Keep it fixed per model: changing it reloads the model.
@@ -97,6 +118,7 @@ class Ollama:
         t = self._think_value(think)
         if t is not None:
             payload["think"] = t
+        self._make_room()
         start = time.monotonic()
         try:
             data = self._post("/api/chat", payload)
@@ -109,6 +131,29 @@ class Ollama:
                 raise
         self._record(data, time.monotonic() - start)
         return data["message"]
+
+    def _make_room(self) -> None:
+        """Unload the model Scholar used last if it's a different one (one model in memory at a time)."""
+        if not self.one_at_a_time:
+            return
+        with _switch_lock:
+            previous = _last_model.get(self.url)
+            _last_model[self.url] = self.model
+        if previous is None:
+            # First call since Scholar started: one of his other models may still be loaded from before.
+            others = _mine.get(self.url, set()) - {self.model}
+            for m in loaded_models(self.url):
+                if m["name"] in others or m["name"].removesuffix(":latest") in others:
+                    self.unload(m["name"])
+        elif previous != self.model:
+            self.unload(previous)
+
+    def unload(self, model: str | None = None) -> None:
+        """Ask Ollama to drop a model from memory now (keep_alive 0). Harmless if it isn't loaded."""
+        try:
+            self._post("/api/generate", {"model": model or self.model, "keep_alive": 0})
+        except LLMError:
+            pass
 
     def _record(self, data: dict, wall: float) -> None:
         ns = 1e9

@@ -60,6 +60,10 @@ class Config:
     think: str = field(default_factory=lambda: {"1": "all", "true": "all", "yes": "all", "0": "off", "false": "off",
                                                 "no": "off"}.get(_env("SCHOLAR_THINK", "checks").lower(),
                                                                  _env("SCHOLAR_THINK", "checks").lower()))
+    # Keep only one of Scholar's models in memory at a time (unload the last one before switching).
+    # Strongly recommended on 16GB machines; 0 lets Ollama keep several loaded (32GB+ machines).
+    one_model_at_a_time: bool = field(default_factory=lambda: _env("SCHOLAR_ONE_MODEL", "1").lower()
+                                      not in ("0", "false", "no"))
     llm_timeout: int = field(default_factory=lambda: int(_env("SCHOLAR_LLM_TIMEOUT", "900")))
     assistant_name: str = field(default_factory=lambda: _env("SCHOLAR_NAME", "Scholar"))
     user_name: str = field(default_factory=lambda: _env("SCHOLAR_USER", "boss"))

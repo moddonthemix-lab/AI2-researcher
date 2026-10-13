@@ -339,9 +339,21 @@ before every answer even when told not to. That's fine inside research (the answ
 but in conversation one short reply took over 10 minutes on a CPU. Use `qwen3:4b-instruct` (answers in
 seconds) or the hybrid `qwen3:8b`. `scholar doctor` tests your models and warns you.
 
-**16GB of memory: two models at a time.** Each model Ollama keeps loaded takes RAM; past two, the Mac starts
-swapping and everything crawls. Tell Ollama: `launchctl setenv OLLAMA_MAX_LOADED_MODELS 2` (then restart
-Ollama).
+**One model in memory at a time.** A model has to sit entirely in RAM while it works. On a 16GB Mac,
+Scholar's thinker (~6.8 GB loaded) plus his reader (~4.3 GB) plus macOS and your apps is already at the
+limit, and past it the Mac swaps memory to disk: in testing, a one-sentence answer that takes 5 seconds
+took **7 minutes** with three models loaded. So Scholar keeps **one of his models loaded at a time**. Before
+switching (reader → thinker) he tells Ollama to unload the other. Switching costs ~6–10 seconds to load
+from disk; staying on one model costs nothing, and research batches its work so switches are few.
+He never unloads other apps' models (like Amo's). To make it a rule for *every* app on the Mac:
+
+```bash
+launchctl setenv OLLAMA_MAX_LOADED_MODELS 1     # then quit and reopen Ollama
+```
+
+`scholar doctor` shows what's loaded and warns when several chat models crowd memory. On a 32GB+ machine,
+`SCHOLAR_ONE_MODEL=0` lets both stay loaded. What Scholar needs: `qwen3:8b` (thinker, 5.2 GB download),
+`qwen3:4b-instruct` (reader, 2.5 GB), `nomic-embed-text` (memory search, 0.3 GB): about 8 GB of disk.
 
 **Raspberry Pi 5.** Same code. Either run small models on the Pi itself (`SCHOLAR_PROFILE=pi`: expect
 slow, quick-depth research), or, better, let the Pi borrow a stronger machine's brain:
