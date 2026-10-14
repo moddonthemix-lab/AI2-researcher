@@ -23,6 +23,9 @@ scholar = "scholar.cli:main"
 
 [tool.setuptools]
 packages = ["scholar"]
+# Copied verbatim from the Family Hub repo (github.com/moddonthemix-lab/AIFAMINTERFACE).
+# Do not edit these here — update by re-copying. The connector (scholar/connector.py) uses them.
+py-modules = ["hub_client", "family_brain"]
 
 [tool.setuptools.package-data]
 scholar = ["static/*.html"]

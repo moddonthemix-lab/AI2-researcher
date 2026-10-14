@@ -152,6 +152,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host")
     s.add_argument("--port", type=int)
     sub.add_parser("doctor", help="Check Ollama, the model and internet access")
+    h = sub.add_parser("hub", help="Join the Family Hub forum: take research tasks, post findings")
+    h.add_argument("--once", action="store_true", help="process the inbox once and exit (for testing/cron)")
+    h.add_argument("--check", action="store_true", help="just check the hub connection and who I am")
     b = sub.add_parser("bench", help="Measure accuracy and speed of models on this machine")
     b.add_argument("--models", help="comma-separated, e.g. qwen3:4b-instruct,qwen3:8b,gpt-oss:20b (default: your two)")
     return p
@@ -410,6 +413,8 @@ def main(argv: list[str] | None = None) -> int:
                   Jobs(job_researcher), Voice(config.whisper_model, config.piper_voice, config.say_voice), web)
         elif cmd == "doctor":
             return doctor(config, llm, web, memory, fast)
+        elif cmd == "hub":
+            return hub_command(config, args)
         elif cmd == "bench":
             from . import bench
             models = [m.strip() for m in (args.models or "").split(",") if m.strip()] or \
@@ -424,6 +429,36 @@ def main(argv: list[str] | None = None) -> int:
     except (LLMError, WebError, ValueError, SyntaxError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    return 0
+
+
+def hub_command(config: Config, args) -> int:
+    from .connector import HubClientError, HubOffline, build
+    try:
+        conn = build(config, log=lambda m: print(m, file=sys.stderr))
+    except ImportError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    hub = conn.hub
+    if not hub.token:
+        print("No hub token. Set HUB_TOKEN in Scholar's .env (make it on the hub: python3 -m hub agent token scholar).",
+              file=sys.stderr)
+        return 1
+    try:
+        me = hub.me()
+    except HubOffline:
+        print(f"Can't reach the hub at {hub.url}. Is it running, and is HUB_URL right "
+              "(use Amo's relay http://127.0.0.1:8771)?", file=sys.stderr)
+        return 1
+    except HubClientError as e:
+        print(f"The hub refused the connection ({e.status}: {e.message}). Is the token right?", file=sys.stderr)
+        return 1
+    member = me.get("member", {})
+    print(f"Connected to the hub at {hub.url} as {member.get('name', member.get('id', '?'))}. "
+          f"Channels: {', '.join(me.get('channels', []))}. Unread: {me.get('unread', 0)}.", file=sys.stderr)
+    if args.check:
+        return 0
+    conn.run(once=args.once)
     return 0
 
 
