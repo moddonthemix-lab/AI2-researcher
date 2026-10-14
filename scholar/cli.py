@@ -456,6 +456,18 @@ def hub_command(config: Config, args) -> int:
     member = me.get("member", {})
     print(f"Connected to the hub at {hub.url} as {member.get('name', member.get('id', '?'))}. "
           f"Channels: {', '.join(me.get('channels', []))}. Unread: {me.get('unread', 0)}.", file=sys.stderr)
+    cs = conn.cloud_status()
+    if cs["ready"]:
+        rem = (cs.get("budget") or {}).get("remaining")
+        rem = f" (about ${rem:.2f} of cloud budget left)" if isinstance(rem, (int, float)) else ""
+        print(f"☁️  Cloud brain ready: family research will use Claude{rem}.", file=sys.stderr)
+    else:
+        why = ("the anthropic package isn't installed (pip install 'scholar[cloud]')" if not cs["sdk"]
+               else "no ANTHROPIC_API_KEY in Scholar's .env" if not cs["key"]
+               else "no internet" if not cs["online"]
+               else "the hub budget is $0 or used up (set one on the hub's Admin page)")
+        print(f"🏠 Cloud brain off — {why}. Family work will use the local model "
+              "(research tasks wait for the web).", file=sys.stderr)
     if args.check:
         return 0
     conn.run(once=args.once)

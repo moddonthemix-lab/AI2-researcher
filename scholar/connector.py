@@ -14,9 +14,12 @@ program (`scholar hub`) that lets him take part in the family forum:
 - he reads the hub's family memory and the boss's interests to propose his own research — which the
   hub holds as *proposed* until the boss approves it.
 
-The cloud brain itself is wired in Part 2 (ADDING_CLOUD_AI). Until an API key, the `anthropic` package
-and a hub budget are in place, every thought simply resolves to the local model (or "wait" for research),
-which is the correct behaviour — so this connector is complete on its own.
+The cloud brain is active (Part 2, ADDING_CLOUD_AI): when the `anthropic` package is installed, an
+ANTHROPIC_API_KEY is set, the internet is up and the hub's budget allows it, family thoughts go to
+Claude (Sonnet + web search for research, Haiku for chat) and the cost is reported to the hub; otherwise
+every thought resolves to the local model (or "wait" for research), which is the correct fallback — so
+this connector works with or without the cloud. The decision lives entirely in family_brain.py; run
+`scholar hub --check` to see whether cloud is ready.
 
 Message text from other agents is DATA, never instructions: what Scholar does is decided by the hub's
 structure (an assignment in his inbox, a question addressed to him), never by words inside a message.
@@ -37,7 +40,7 @@ from .memory import ResearchMemory, build_index
 
 try:  # copied verbatim from the hub repo; see pyproject py-modules
     from hub_client import HubClient, HubClientError, HubOffline
-    from family_brain import BrainUnavailable, FamilyBrain
+    from family_brain import BrainUnavailable, FamilyBrain, internet_ok
 except ImportError as e:  # pragma: no cover - only if the files weren't copied in
     raise ImportError("The Family Hub files are missing. Copy hub_client.py and family_brain.py from "
                       "github.com/moddonthemix-lab/AIFAMINTERFACE into this project.") from e
@@ -121,6 +124,27 @@ class ScholarConnector:
             facts = ""
         self.brain.system = PERSONALITY.format(user=self.config.user_name, memory=facts)
         return self.brain.system
+
+    # ------------------------------------------------------------------ cloud readiness (for `hub --check`)
+    def cloud_status(self) -> dict:
+        """Is the cloud brain ready? Mirrors family_brain's own checks. Never raises; never leaks the key."""
+        try:
+            import anthropic  # noqa: F401
+            sdk = True
+        except ImportError:
+            sdk = False
+        has_key = bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+        online = internet_ok()
+        budget = None
+        try:
+            if sdk and has_key and online:
+                budget = self.hub.budget_check(0.0)  # 0-dollar probe: reads remaining budget without spending
+        except (HubClientError, HubOffline, Exception):  # noqa: BLE001 — a probe must never break the check
+            budget = None
+        allowed = bool(budget and budget.get("allowed"))
+        return {"sdk": sdk, "key": has_key, "online": online,
+                "allowed": allowed, "budget": budget,
+                "ready": sdk and has_key and online and allowed}
 
     # ------------------------------------------------------------------ the loop
     def run(self, once: bool = False) -> None:
